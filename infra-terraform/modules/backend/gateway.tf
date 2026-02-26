@@ -175,8 +175,8 @@ resource "aws_iam_role_policy" "gateway" {
 }
 
 # -----------------------------------------------------------------------------
-# IAM propagation delay
-# BUG-003: Gateway Target creation can fail due to IAM role propagation delay
+# Wait for IAM permission propagation
+# Gateway Target creation can fail due to IAM role propagation delay
 # -----------------------------------------------------------------------------
 
 resource "time_sleep" "gateway_iam_propagation" {
