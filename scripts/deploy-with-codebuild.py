@@ -211,7 +211,6 @@ def create_permission_boundary(policy_name: str) -> str:
                 "Action": [
                     "iam:CreateUser",
                     "iam:CreateAccessKey",
-                    "iam:PutRolePolicy",
                     "iam:CreateLoginProfile",
                     "iam:AttachUserPolicy",
                     "iam:PutUserPolicy",
@@ -352,6 +351,7 @@ def create_codebuild_project(
         "  build:\n"
         "    commands:\n"
         '      - echo "Source dir contents:" && ls -la $CODEBUILD_SRC_DIR/\n'
+        "      - cd $CODEBUILD_SRC_DIR/infra-cdk && cdk bootstrap\n"
         "      - cd $CODEBUILD_SRC_DIR/infra-cdk && cdk deploy --all --require-approval never\n"
         "  post_build:\n"
         "    commands:\n"
@@ -661,11 +661,17 @@ def main() -> int:
         log_error("AWS credentials not configured or invalid")
         return 1
 
-    # Detect region
-    try:
-        region: str = run_command(["aws", "configure", "get", "region"]).stdout.strip()
-    except subprocess.CalledProcessError:
-        region = os.environ.get("AWS_DEFAULT_REGION", "")
+    # Detect region — precedence: AWS_REGION > AWS_DEFAULT_REGION > aws configure.
+    # This matches the AWS SDK's own resolution order and allows callers to
+    # override the profile's default region via environment variables.
+    region: str = (
+        os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or ""
+    )
+    if not region:
+        try:
+            region = run_command(["aws", "configure", "get", "region"]).stdout.strip()
+        except subprocess.CalledProcessError:
+            region = ""
     if not region:
         log_error("AWS region not configured")
         return 1
