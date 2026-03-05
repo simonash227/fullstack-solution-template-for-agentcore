@@ -1,5 +1,6 @@
 import * as cdk from "aws-cdk-lib"
 import * as cognito from "aws-cdk-lib/aws-cognito"
+import * as ec2 from "aws-cdk-lib/aws-ec2"
 import * as iam from "aws-cdk-lib/aws-iam"
 import * as ssm from "aws-cdk-lib/aws-ssm"
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager"
@@ -35,7 +36,6 @@ export class BackendStack extends cdk.NestedStack {
   public runtimeArn: string
   public memoryArn: string
   private agentName: cdk.CfnParameter
-  private networkMode: cdk.CfnParameter
   private userPool: cognito.IUserPool
   private machineClient: cognito.UserPoolClient
   private machineClientSecret: secretsmanager.Secret
@@ -104,13 +104,6 @@ export class BackendStack extends cdk.NestedStack {
       type: "String",
       default: "StrandsAgent",
       description: "Name for the agent runtime",
-    })
-
-    this.networkMode = new cdk.CfnParameter(this, "NetworkMode", {
-      type: "String",
-      default: "PUBLIC",
-      description: "Network mode for AgentCore resources",
-      allowedValues: ["PUBLIC", "PRIVATE"],
     })
 
     const stack = cdk.Stack.of(this)
@@ -217,11 +210,12 @@ export class BackendStack extends cdk.NestedStack {
       )
     }
 
-    // Configure network mode
-    const networkConfiguration =
-      this.networkMode.valueAsString === "PRIVATE"
-        ? undefined // For private mode, you would need to configure VPC settings
-        : agentcore.RuntimeNetworkConfiguration.usingPublicNetwork()
+    // Configure network mode based on config.yaml settings.
+    // PUBLIC: Runtime is accessible over the public internet (default).
+    // VPC: Runtime is deployed into a user-provided VPC for private network isolation.
+    //      The user must ensure their VPC has the necessary VPC endpoints for AWS services.
+    //      See docs/DEPLOYMENT.md for the full list of required VPC endpoints.
+    const networkConfiguration = this.buildNetworkConfiguration(config)
 
     // Configure JWT authorizer with Cognito
     const authorizerConfiguration = agentcore.RuntimeAuthorizerConfiguration.usingJWT(
@@ -923,6 +917,61 @@ export class BackendStack extends cdk.NestedStack {
     })
 
 
+  }
+
+  /**
+   * Builds the RuntimeNetworkConfiguration based on the config.yaml settings.
+   * When network_mode is "VPC", imports the user's existing VPC, subnets, and
+   * optionally security groups, then returns a VPC-based network configuration.
+   * When network_mode is "PUBLIC" (default), returns a public network configuration.
+   *
+   * @param config - The application configuration from config.yaml.
+   * @returns A RuntimeNetworkConfiguration for the AgentCore Runtime.
+   */
+  private buildNetworkConfiguration(config: AppConfig): agentcore.RuntimeNetworkConfiguration {
+    if (config.backend.network_mode === "VPC") {
+      const vpcConfig = config.backend.vpc
+      // vpc config is validated in ConfigManager, but guard here for type safety
+      if (!vpcConfig) {
+        throw new Error("backend.vpc configuration is required when network_mode is 'VPC'.")
+      }
+
+      // Import the user's existing VPC by ID.
+      // This performs a context lookup at synth time to resolve VPC attributes.
+      const vpc = ec2.Vpc.fromLookup(this, "ImportedVpc", {
+        vpcId: vpcConfig.vpc_id,
+      })
+
+      // Import the user-specified subnets by their IDs.
+      // These subnets must exist within the VPC specified above.
+      const subnets: ec2.ISubnet[] = vpcConfig.subnet_ids.map(
+        (subnetId: string, index: number) =>
+          ec2.Subnet.fromSubnetId(this, `ImportedSubnet${index}`, subnetId)
+      )
+
+      // Build the VPC config props for the AgentCore L2 construct.
+      // Security groups are optional — if not provided, the construct creates a default one.
+      const securityGroups =
+        vpcConfig.security_group_ids && vpcConfig.security_group_ids.length > 0
+          ? vpcConfig.security_group_ids.map(
+              (sgId: string, index: number) =>
+                ec2.SecurityGroup.fromSecurityGroupId(this, `ImportedSG${index}`, sgId)
+            )
+          : undefined
+
+      const vpcConfigProps: agentcore.VpcConfigProps = {
+        vpc: vpc,
+        vpcSubnets: {
+          subnets: subnets,
+        },
+        securityGroups: securityGroups,
+      }
+
+      return agentcore.RuntimeNetworkConfiguration.usingVpc(this, vpcConfigProps)
+    }
+
+    // Default: public network mode
+    return agentcore.RuntimeNetworkConfiguration.usingPublicNetwork()
   }
 
   /**

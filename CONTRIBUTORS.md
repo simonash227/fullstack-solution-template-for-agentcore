@@ -13,3 +13,4 @@
 - Mingce Bi
 - Andrew Ang
 - Tesfagabir Meharizghi
+- Gauhar Bains
