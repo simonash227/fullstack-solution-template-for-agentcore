@@ -5,6 +5,57 @@ All notable changes to the Fullstack AgentCore Solution Template (FAST) will be 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- CodeBuild-based deployment script (`scripts/deploy-with-codebuild.py`) that enables deploying FAST without requiring Docker
+- [Terraform] Full Terraform infrastructure alternative to CDK (`infra-terraform/`) with modules for Amplify Hosting, Cognito, and Backend (Runtime, Gateway, Memory, Feedback API, SSM)
+- [Terraform] Support for both Docker and Zip deployment types via `deployment_type` variable
+- [Terraform] Dedicated scripts for frontend deployment (`deploy-frontend.py`, `deploy-frontend.sh`), Docker image build (`build-and-push-image.sh`), and agent testing (`test-agent.py`)
+- [Terraform] S3 backend configuration example (`backend.tf.example`) for remote state management
+- [Terraform] Version bump playbook (`TF_VERSION_BUMP_PLAYBOOK.md`) with independent versioning scheme
+- OAuth2 Credential Provider Lambda handler (`infra-cdk/lambdas/oauth2-provider/index.py`) for lifecycle management with Create, Update, and Delete support
+- AgentCore Identity OAuth2 integration via `@requires_access_token` decorator in agent patterns
+- Token refresh helpers (`_fetch_gateway_token`) in both Strands and LangGraph agents for fresh token retrieval
+- Decorator comment explaining OAuth2 Credential Provider and Token Vault caching behavior
+- Runtime environment variable `GATEWAY_CREDENTIAL_PROVIDER_NAME` for OAuth2 provider lookup
+- OAuth2 Credential Provider and Token Vault IAM permissions to agent runtime role
+- Scoped Secrets Manager IAM permissions to agent runtime role for OAuth2 secrets
+- `docs/RUNTIME_GATEWAY_AUTH.md` - Comprehensive documentation of the M2M authentication workflow between AgentCore Runtime and Gateway, covering both deployment (OAuth2 provider registration) and runtime (token retrieval and validation) phases
+- Updated architecture diagram (`docs/architecture-diagram/FAST-architecture-20260302.png`) illustrating OAuth2 M2M authentication flow with Token Vault and OAuth2 Credential Provider
+
+### Changed
+
+- Migrated Gateway authentication to AgentCore SDK `@requires_access_token` decorator
+- Simplified agent code in `patterns/strands-single-agent/basic_agent.py` and `patterns/langgraph-single-agent/langgraph_agent.py`
+- Use `cr.Provider` pattern for OAuth2 provider to avoid IAM propagation delays
+- Implemented scoped IAM permissions for OAuth2 provider, Token Vault, and Secrets Manager
+- Updated OAuth2 Custom Resource to pass secret ARN for enhanced security (secret retrieved at Lambda runtime)
+- Modified agent token handling to fetch fresh tokens on reconnection (Strands) and per-request (LangGraph)
+- Moved Secrets Manager permissions from base `AgentCoreRole` utility class to backend-stack.ts for better separation of concerns
+- Updated `README.md` to reference new architecture diagram and clarify OAuth2 M2M authentication flow descriptions
+- Updated `test-scripts/README.md` to remove Docker container testing documentation
+
+### Removed
+
+- Docker container testing script (`test-scripts/test-agent-docker.py`)
+- Docker testing documentation (`docs/LOCAL_DOCKER_TESTING.md`)
+- Manual OAuth2 functions from `patterns/utils/auth.py` (`get_gateway_access_token()`, `get_secret()`)
+- Manual token fetching logic from agent code
+- Direct Secrets Manager access from agents
+- Wildcard Secrets Manager IAM permissions from base `AgentCoreRole` utility class
+
+### Fixed
+
+- Stale token errors in agents by implementing fresh token retrieval on MCP Gateway reconnection (Strands) and per-request (LangGraph)
+- IAM permission scoping to prevent overly broad wildcard access
+
+### Security
+
+- Enhanced security by delegating OAuth2 token management to AgentCore Identity service
+- Improved token lifecycle management with automatic refresh and error handling via Token Vault
+
 ## [0.3.1] - 2026-02-11
 
 ### Added

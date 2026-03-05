@@ -3,6 +3,7 @@ import os
 import traceback
 
 import boto3
+from bedrock_agentcore.identity.auth import requires_access_token
 from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
 from bedrock_agentcore.memory.integrations.strands.session_manager import (
     AgentCoreMemorySessionManager,
@@ -14,19 +15,50 @@ from strands.models import BedrockModel
 from strands.tools.mcp import MCPClient
 from strands_code_interpreter import StrandsCodeInterpreterTools
 
-from utils.auth import extract_user_id_from_context, get_gateway_access_token
+from utils.auth import extract_user_id_from_context
 from utils.ssm import get_ssm_parameter
 
 app = BedrockAgentCoreApp()
 
+# OAuth2 Credential Provider decorator from AgentCore Identity SDK.
+# Automatically retrieves OAuth2 access tokens from the Token Vault (with caching)
+# or fetches fresh tokens from the configured OAuth2 provider when expired.
+# The provider_name references an OAuth2 Credential Provider registered in AgentCore Identity.
+@requires_access_token(
+    provider_name=os.environ["GATEWAY_CREDENTIAL_PROVIDER_NAME"],
+    auth_flow="M2M",
+    scopes=[]
+)
+def _fetch_gateway_token(access_token: str) -> str:
+    """
+    Fetch fresh OAuth2 token for AgentCore Gateway authentication.
+    
+    The @requires_access_token decorator handles token retrieval and refresh:
+    1. Token Retrieval: Calls GetResourceOauth2Token API to fetch token from Token Vault
+    2. Automatic Refresh: Uses refresh tokens to renew expired access tokens
+    3. Error Orchestration: Handles missing tokens and OAuth flow management
+    
+    For M2M (Machine-to-Machine) flows, the decorator uses Client Credentials grant type.
+    The provider_name must match the Name field in the CDK OAuth2CredentialProvider resource.
 
-def create_gateway_mcp_client(access_token: str) -> MCPClient:
+    This MUST be synchronous because it's called inside the MCPClient lambda factory.
+    If it were async, the lambda would receive a coroutine object instead of a string,
+    breaking authentication.
+    """
+    return access_token
+
+
+def create_gateway_mcp_client() -> MCPClient:
     """
     Create MCP client for AgentCore Gateway with OAuth2 authentication.
 
     MCP (Model Context Protocol) is how agents communicate with tool providers.
-    This creates a client that can talk to the AgentCore Gateway using the provided
-    access token for authentication. The Gateway then provides access to Lambda-based tools.
+    This creates a client that can talk to the AgentCore Gateway using OAuth2
+    authentication. The Gateway then provides access to Lambda-based tools.
+    
+    This implementation avoids the "closure trap" by calling _fetch_gateway_token()
+    inside the lambda factory. This ensures a fresh token is fetched on every MCP reconnection,
+    preventing stale token errors.
     """
     stack_name = os.environ.get("STACK_NAME")
     if not stack_name:
@@ -43,9 +75,10 @@ def create_gateway_mcp_client(access_token: str) -> MCPClient:
     print(f"[AGENT] Gateway URL from SSM: {gateway_url}")
 
     # Create MCP client with Bearer token authentication
+    # CRITICAL: Call _fetch_gateway_token() INSIDE the lambda to get fresh token on reconnection
     gateway_client = MCPClient(
         lambda: streamablehttp_client(
-            url=gateway_url, headers={"Authorization": f"Bearer {access_token}"}
+            url=gateway_url, headers={"Authorization": f"Bearer {_fetch_gateway_token()}"}
         ),
         prefix="gateway",
     )
@@ -56,7 +89,7 @@ def create_gateway_mcp_client(access_token: str) -> MCPClient:
 
 def create_basic_agent(user_id: str, session_id: str) -> Agent:
     """
-    Create a basic agent with Gateway MCP tools and memory integration.
+    Create a basic agent with AgentCore Gateway MCP tools and memory integration.
 
     This function sets up an agent that can access tools through the AgentCore Gateway
     and maintains conversation memory. It handles authentication, creates the MCP client
@@ -93,17 +126,13 @@ def create_basic_agent(user_id: str, session_id: str) -> Agent:
         print("[AGENT] Starting agent creation with Gateway tools...")
 
         # Get OAuth2 access token and create Gateway MCP client
-        print("[AGENT] Step 1: Getting OAuth2 access token...")
-        access_token = get_gateway_access_token()
-        print(f"[AGENT] Got access token: {access_token[:20]}...")
-
-        # Create Gateway MCP client with authentication
-        print("[AGENT] Step 2: Creating Gateway MCP client...")
-        gateway_client = create_gateway_mcp_client(access_token)
+        # The @requires_access_token decorator handles token fetching automatically
+        print("[AGENT] Step 1: Creating Gateway MCP client (decorator handles OAuth2)...")
+        gateway_client = create_gateway_mcp_client()
         print("[AGENT] Gateway MCP client created successfully")
 
         print(
-            "[AGENT] Step 3: Creating Agent with Gateway tools and Code Interpreter..."
+            "[AGENT] Step 2: Creating Agent with Gateway tools and Code Interpreter..."
         )
         agent = Agent(
             name="BasicAgent",

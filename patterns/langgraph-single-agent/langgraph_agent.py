@@ -6,25 +6,54 @@ from langchain_aws import ChatBedrock
 from langchain_mcp_adapters.client import MultiServerMCPClient
 import os
 import boto3
+from bedrock_agentcore.identity.auth import requires_access_token
 from bedrock_agentcore.runtime import BedrockAgentCoreApp, RequestContext
 import traceback
 
 # Use official LangGraph AWS integration for memory
 from langgraph_checkpoint_aws import AgentCoreMemorySaver
 
-from utils.auth import extract_user_id_from_context, get_gateway_access_token
+from utils.auth import extract_user_id_from_context
 from utils.ssm import get_ssm_parameter
 
 app = BedrockAgentCoreApp()
 
+# OAuth2 Credential Provider decorator from AgentCore Identity SDK.
+# Automatically retrieves OAuth2 access tokens from the Token Vault (with caching)
+# or fetches fresh tokens from the configured OAuth2 provider when expired.
+# The provider_name references an OAuth2 Credential Provider registered in AgentCore Identity.
+@requires_access_token(
+    provider_name=os.environ["GATEWAY_CREDENTIAL_PROVIDER_NAME"],
+    auth_flow="M2M",
+    scopes=[]
+)
+async def _fetch_gateway_token(access_token: str) -> str:
+    """
+    Fetch fresh OAuth2 token for AgentCore Gateway authentication.
+    
+    This is async because it's called with 'await' in create_gateway_mcp_client().
+    The @requires_access_token decorator handles token retrieval and refresh:
+    1. Token Retrieval: Calls GetResourceOauth2Token API to fetch token from Token Vault
+    2. Automatic Refresh: Uses refresh tokens to renew expired access tokens
+    3. Error Orchestration: Handles missing tokens and OAuth flow management
+    
+    For M2M (Machine-to-Machine) flows, the decorator uses Client Credentials grant type.
+    The provider_name must match the Name field in the CDK OAuth2CredentialProvider resource.
+    """
+    return access_token
 
-async def create_gateway_mcp_client(access_token: str) -> MultiServerMCPClient:
+
+async def create_gateway_mcp_client() -> MultiServerMCPClient:
     """
     Create an MCP client connected to the AgentCore Gateway with OAuth2 authentication.
+
+    MCP (Model Context Protocol) is how agents communicate with tool providers.
+    This creates a client that can talk to the AgentCore Gateway using OAuth2
+    authentication. The Gateway then provides access to Lambda-based tools.
     
-    This function creates a MultiServerMCPClient that manages the connection to the
-    AgentCore Gateway using MCP (Model Context Protocol). The client handles session
-    lifecycle automatically and keeps the connection alive as long as the client exists.
+    This implementation avoids the "closure trap" by calling _fetch_gateway_token()
+    on every invocation of create_gateway_mcp_client(). Since this function is called
+    per-request in agent_stream(), it ensures fresh tokens for each request.
     """
     stack_name = os.environ.get('STACK_NAME')
     if not stack_name:
@@ -40,24 +69,27 @@ async def create_gateway_mcp_client(access_token: str) -> MultiServerMCPClient:
     gateway_url = get_ssm_parameter(f'/{stack_name}/gateway_url')
     print(f"[AGENT] Gateway URL from SSM: {gateway_url}")
     
-    # Create MultiServerMCPClient with Gateway configuration
+    # Fetch fresh token on every call to avoid closure trap
+    fresh_token = await _fetch_gateway_token()
+    
+    # Create MCP client with Bearer token authentication
     gateway_client = MultiServerMCPClient({
         "gateway": {
             "transport": "streamable_http",
             "url": gateway_url,
             "headers": {
-                "Authorization": f"Bearer {access_token}"
+                "Authorization": f"Bearer {fresh_token}"
             }
         }
     })
     
-    print(f"[AGENT] Gateway MCP client created successfully")
+    print("[AGENT] Gateway MCP client created successfully")
     return gateway_client
 
 
 async def create_langgraph_agent(user_id: str, session_id: str, tools: list):
     """
-    Create a LangGraph agent with Gateway MCP tools and memory integration.
+    Create a LangGraph agent with AgentCore Gateway MCP tools and memory integration.
     
     This function sets up a LangGraph StateGraph that can access tools through
     the AgentCore Gateway and maintains conversation memory.
@@ -134,16 +166,12 @@ async def agent_stream(payload, context: RequestContext):
         print(f"[STREAM] Starting streaming invocation for user: {user_id}, session: {session_id}")
         print(f"[STREAM] Query: {user_query}")
         
-        # Get OAuth2 access token for Gateway
-        print("[STREAM] Getting OAuth2 access token...")
-        access_token = get_gateway_access_token()
-        print(f"[STREAM] Got access token: {access_token[:20]}...")
+        # Get OAuth2 access token and create Gateway MCP client
+        # The @requires_access_token decorator handles token fetching automatically
+        print("[STREAM] Creating Gateway MCP client (decorator handles OAuth2)...")
+        mcp_client = await create_gateway_mcp_client()
+        print("[STREAM] Gateway MCP client created successfully")
         
-        # Create MCP client for Gateway
-        print("[STREAM] Creating Gateway MCP client...")
-        mcp_client = await create_gateway_mcp_client(access_token)
-        
-        # Load tools from Gateway - client manages session lifecycle automatically
         print("[STREAM] Loading Gateway tools...")
         tools = await mcp_client.get_tools()
         print(f"[STREAM] Loaded {len(tools)} tools from Gateway")
