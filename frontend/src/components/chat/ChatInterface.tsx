@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { ChatHeader } from "./ChatHeader"
 import { ChatInput } from "./ChatInput"
 import { ChatMessages } from "./ChatMessages"
+import { QuickActions } from "./QuickActions"
 import { Message, MessageSegment, ToolCall } from "./types"
 
 import { useGlobal } from "@/app/context/GlobalContext"
@@ -20,6 +21,13 @@ export default function ChatInterface() {
   const [error, setError] = useState<string | null>(null)
   const [client, setClient] = useState<AgentCoreClient | null>(null)
   const [sessionId] = useState(() => crypto.randomUUID())
+  const [branding, setBranding] = useState<{
+    primaryColour?: string
+    logoUrl?: string | null
+    firmName?: string
+    agentName?: string
+  }>({})
+  const [quickActions, setQuickActions] = useState<string[]>([])
 
   const { isLoading, setIsLoading } = useGlobal()
   const auth = useAuth()
@@ -53,6 +61,13 @@ export default function ChatInterface() {
         })
 
         setClient(agentClient)
+
+        if (config.branding) {
+          setBranding(config.branding)
+        }
+        if (config.quickActions) {
+          setQuickActions(config.quickActions)
+        }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : "Unknown error"
         setError(`Configuration error: ${errorMessage}`)
@@ -269,7 +284,12 @@ export default function ChatInterface() {
     <div className="flex flex-col h-screen w-full">
       {/* Fixed header */}
       <div className="flex-none">
-        <ChatHeader onNewChat={startNewChat} canStartNewChat={hasAssistantMessages} />
+        <ChatHeader
+          onNewChat={startNewChat}
+          canStartNewChat={hasAssistantMessages}
+          title={branding.agentName ? `${branding.agentName} — ${branding.firmName || ""}` : undefined}
+          logoUrl={branding.logoUrl}
+        />
         {error && (
           <div className="bg-red-50 border-l-4 border-red-500 p-4 mx-4 mt-2">
             <p className="text-sm text-red-700">{error}</p>
@@ -286,9 +306,34 @@ export default function ChatInterface() {
 
           {/* Centered welcome message */}
           <div className="text-center mb-6">
-            <h2 className="text-2xl font-bold text-gray-800">Welcome to FAST Chat</h2>
-            <p className="text-gray-600 mt-2">Ask me anything to get started</p>
+            {branding.logoUrl && (
+              <img
+                src={branding.logoUrl}
+                alt={branding.firmName || "Logo"}
+                className="h-16 mx-auto mb-4"
+              />
+            )}
+            <h2 className="text-2xl font-bold text-gray-800">
+              {branding.agentName
+                ? `Hi, I'm ${branding.agentName}`
+                : "Welcome to FAST Chat"}
+            </h2>
+            <p className="text-gray-600 mt-2">
+              {branding.firmName
+                ? `Your AI chief of staff at ${branding.firmName}`
+                : "Ask me anything to get started"}
+            </p>
           </div>
+
+          {/* Quick actions */}
+          {quickActions.length > 0 && (
+            <div className="mb-6">
+              <QuickActions
+                actions={quickActions}
+                onActionClick={(action) => setInput(action)}
+              />
+            </div>
+          )}
 
           {/* Centered input */}
           <div className="px-4 mb-16 max-w-4xl mx-auto w-full">
@@ -314,6 +359,7 @@ export default function ChatInterface() {
                 messagesEndRef={messagesEndRef}
                 sessionId={sessionId}
                 onFeedbackSubmit={handleFeedbackSubmit}
+                onSendMessage={sendMessage}
               />
             </div>
           </div>

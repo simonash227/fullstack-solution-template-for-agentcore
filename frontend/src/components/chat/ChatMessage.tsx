@@ -1,24 +1,66 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useMemo } from "react"
 import { ThumbsUp, ThumbsDown } from "lucide-react"
-import { Message } from "./types"
+import { Message, Citation } from "./types"
 import { FeedbackDialog } from "./FeedbackDialog"
 import { getToolRenderer } from "@/hooks/useToolRenderer"
 import { MarkdownRenderer } from "./MarkdownRenderer"
+import { ApprovalCard, parseApprovalRequest } from "./ApprovalCard"
+
+// Matches the formatted output from the KB search Lambda:
+// [Source: filename.pdf, relevance: 0.85]\nchunk text\n\n
+const KB_RESULT_PATTERN = /\[Source:\s*([^,\]]+),\s*relevance:\s*([\d.]+)\]\n([\s\S]*?)(?=\n\[Source:|$)/g
+
+/**
+ * Parse citation data from a KB search tool result string.
+ */
+function parseCitationsFromToolResult(result: string): Citation[] {
+  const citations: Citation[] = []
+  KB_RESULT_PATTERN.lastIndex = 0
+  let match
+
+  while ((match = KB_RESULT_PATTERN.exec(result)) !== null) {
+    citations.push({
+      source_name: match[1].trim(),
+      text: match[3].trim(),
+      relevance_score: parseFloat(match[2]),
+    })
+  }
+
+  return citations
+}
 
 interface ChatMessageProps {
   message: Message
   sessionId: string
   onFeedbackSubmit: (feedbackType: "positive" | "negative", comment: string) => Promise<void>
+  onSendMessage?: (message: string) => void
 }
 
-export function ChatMessage({ message, sessionId: _sessionId, onFeedbackSubmit }: ChatMessageProps) {
+export function ChatMessage({ message, sessionId: _sessionId, onFeedbackSubmit, onSendMessage }: ChatMessageProps) {
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [selectedFeedbackType, setSelectedFeedbackType] = useState<"positive" | "negative">(
     "positive"
   )
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false)
+
+  // Extract citations from search_documents tool results in this message
+  const citations = useMemo<Citation[]>(() => {
+    if (!message.segments) return []
+
+    const allCitations: Citation[] = []
+    for (const seg of message.segments) {
+      if (
+        seg.type === "tool" &&
+        seg.toolCall.name.includes("search_documents") &&
+        seg.toolCall.result
+      ) {
+        allCitations.push(...parseCitationsFromToolResult(seg.toolCall.result))
+      }
+    }
+    return allCitations
+  }, [message.segments])
 
   const formatTime = (timestamp: string) => {
     return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
@@ -39,7 +81,28 @@ export function ChatMessage({ message, sessionId: _sessionId, onFeedbackSubmit }
     if (message.segments && message.segments.length > 0) {
       return message.segments.map((seg, i) => {
         if (seg.type === "text") {
-          return <MarkdownRenderer key={i} content={seg.content} />;
+          // Check if this text contains an approval request
+          const approval = parseApprovalRequest(seg.content);
+          if (approval) {
+            // Render the approval card, plus any text after the approval block
+            const afterApproval = seg.content.replace(
+              /\[APPROVAL_REQUIRED\][\s\S]*?\[\/APPROVAL_REQUIRED\]\s*/,
+              ""
+            ).trim();
+            return (
+              <div key={i}>
+                <ApprovalCard
+                  actionType={approval.actionType}
+                  summary={approval.summary}
+                  details={approval.details}
+                  onApprove={() => onSendMessage?.("Approved. Go ahead.")}
+                  onReject={() => onSendMessage?.("Rejected. Do not proceed with this action.")}
+                />
+                {afterApproval && <MarkdownRenderer content={afterApproval} citations={citations} />}
+              </div>
+            );
+          }
+          return <MarkdownRenderer key={i} content={seg.content} citations={citations} />;
         }
         const render = getToolRenderer(seg.toolCall.name);
         if (!render) return null;
@@ -50,8 +113,27 @@ export function ChatMessage({ message, sessionId: _sessionId, onFeedbackSubmit }
         );
       });
     }
-    // Fallback: just render content as markdown
-    return <MarkdownRenderer content={message.content} />;
+    // Fallback: check plain content for approval request
+    const approval = parseApprovalRequest(message.content);
+    if (approval) {
+      const afterApproval = message.content.replace(
+        /\[APPROVAL_REQUIRED\][\s\S]*?\[\/APPROVAL_REQUIRED\]\s*/,
+        ""
+      ).trim();
+      return (
+        <div>
+          <ApprovalCard
+            actionType={approval.actionType}
+            summary={approval.summary}
+            details={approval.details}
+            onApprove={() => onSendMessage?.("Approved. Go ahead.")}
+            onReject={() => onSendMessage?.("Rejected. Do not proceed with this action.")}
+          />
+          {afterApproval && <MarkdownRenderer content={afterApproval} citations={citations} />}
+        </div>
+      );
+    }
+    return <MarkdownRenderer content={message.content} citations={citations} />;
   };
 
   return (

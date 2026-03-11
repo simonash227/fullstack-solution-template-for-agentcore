@@ -376,6 +376,7 @@ def generate_aws_exports(
         "agentRuntimeArn": outputs["RuntimeArn"],
         "awsRegion": region,
         "feedbackApiUrl": outputs["FeedbackApiUrl"],
+        "documentsApiUrl": outputs.get("DocumentsApiUrl", ""),
         "agentPattern": pattern,
     }
 

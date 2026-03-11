@@ -1,0 +1,22 @@
+[
+  {
+    "name": "search_documents",
+    "description": "Search the firm's document knowledge base. Use this to find information in uploaded documents such as contracts, financial reports, board papers, engagement letters, and other business documents. Returns relevant passages with source document names for citation.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "The search query describing what information you are looking for in the documents"
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of document passages to return (optional, default 5, max 10)"
+        }
+      },
+      "required": [
+        "query"
+      ]
+    }
+  }
+]

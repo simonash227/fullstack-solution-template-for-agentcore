@@ -22,6 +22,13 @@ export interface Message {
   segments?: MessageSegment[]
 }
 
+// Citation from Knowledge Base retrieval
+export interface Citation {
+  source_name: string
+  text: string
+  relevance_score: number
+}
+
 // Define chat session types
 export interface ChatSession {
   id: string

@@ -1,0 +1,60 @@
+[
+  {
+    "name": "gmail_list_emails",
+    "description": "List recent emails from the user's Gmail inbox. Returns subject, sender, date, and a preview. Use when the user asks about their emails, inbox, or messages.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of emails to return (default 10, max 25)"
+        },
+        "search_query": {
+          "type": "string",
+          "description": "Optional Gmail search query to filter emails (e.g., 'from:john@acme.com', 'subject:invoice', 'is:unread')"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "gmail_read_email",
+    "description": "Read the full content of a specific email by its ID. Use after gmail_list_emails to get the complete body of an email.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "string",
+          "description": "The Gmail message ID of the email to read"
+        }
+      },
+      "required": ["message_id"]
+    }
+  },
+  {
+    "name": "gmail_send_email",
+    "description": "Send an email via Gmail. IMPORTANT: Always confirm with the user before sending. Show them the recipient, subject, and body for approval first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "to": {
+          "type": "string",
+          "description": "Recipient email address"
+        },
+        "subject": {
+          "type": "string",
+          "description": "Email subject line"
+        },
+        "body": {
+          "type": "string",
+          "description": "Email body content (plain text)"
+        },
+        "cc": {
+          "type": "string",
+          "description": "Optional CC recipient email address"
+        }
+      },
+      "required": ["to", "subject", "body"]
+    }
+  }
+]

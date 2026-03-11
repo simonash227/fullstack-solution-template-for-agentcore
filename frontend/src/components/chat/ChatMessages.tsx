@@ -11,6 +11,7 @@ interface ChatMessagesProps {
     feedbackType: "positive" | "negative",
     comment: string
   ) => Promise<void>
+  onSendMessage?: (message: string) => void
 }
 
 export function ChatMessages({
@@ -18,6 +19,7 @@ export function ChatMessages({
   messagesEndRef,
   sessionId,
   onFeedbackSubmit,
+  onSendMessage,
 }: ChatMessagesProps) {
   return (
     <div
@@ -38,6 +40,7 @@ export function ChatMessages({
             onFeedbackSubmit={async (feedbackType, comment) => {
               await onFeedbackSubmit(message.content, feedbackType, comment)
             }}
+            onSendMessage={onSendMessage}
           />
         ))
       )}

@@ -35,6 +35,7 @@ EXPOSE 8080
 # Copy agent code files
 COPY patterns/strands-single-agent/basic_agent.py .
 COPY patterns/strands-single-agent/strands_code_interpreter.py .
+COPY patterns/strands-single-agent/tools/ tools/
 COPY patterns/utils/ utils/
 
 # Healthcheck using Python (no extra dependencies needed)

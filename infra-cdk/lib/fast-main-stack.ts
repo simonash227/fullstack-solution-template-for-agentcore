@@ -6,6 +6,8 @@ import { AppConfig } from "./utils/config-manager"
 import { BackendStack } from "./backend-stack"
 import { AmplifyHostingStack } from "./amplify-hosting-stack"
 import { CognitoStack } from "./cognito-stack"
+import { KnowledgeBaseStack } from "./knowledge-base-stack"
+import { ObservabilityStack } from "./observability-stack"
 
 export interface FastAmplifyStackProps extends cdk.StackProps {
   config: AppConfig
@@ -15,6 +17,8 @@ export class FastMainStack extends cdk.Stack {
   public readonly amplifyHostingStack: AmplifyHostingStack
   public readonly backendStack: BackendStack
   public readonly cognitoStack: CognitoStack
+  public readonly knowledgeBaseStack: KnowledgeBaseStack
+  public readonly observabilityStack: ObservabilityStack
 
   constructor(scope: Construct, id: string, props: FastAmplifyStackProps) {
     const description =
@@ -31,6 +35,12 @@ export class FastMainStack extends cdk.Stack {
       callbackUrls: ["http://localhost:3000", this.amplifyHostingStack.amplifyUrl],
     })
 
+    // Step 3: Knowledge Base stack (documents bucket + KB)
+    // Created before backend so KB ID can be passed to Gateway
+    this.knowledgeBaseStack = new KnowledgeBaseStack(this, `${id}-kb`, {
+      config: props.config,
+    })
+
     // Step 2: Create backend stack with the predictable Amplify URL and Cognito details
     this.backendStack = new BackendStack(this, `${id}-backend`, {
       config: props.config,
@@ -38,7 +48,23 @@ export class FastMainStack extends cdk.Stack {
       userPoolClientId: this.cognitoStack.userPoolClientId,
       userPoolDomain: this.cognitoStack.userPoolDomain,
       frontendUrl: this.amplifyHostingStack.amplifyUrl,
+      knowledgeBaseId: this.knowledgeBaseStack.knowledgeBaseId,
+      dataSourceId: this.knowledgeBaseStack.dataSourceId,
+      documentsBucketArn: this.knowledgeBaseStack.documentsBucket.bucketArn,
+      documentsBucketName: this.knowledgeBaseStack.documentsBucket.bucketName,
+      documentsKeyArn: this.knowledgeBaseStack.documentsKey.keyArn,
     })
+
+    // Step 5c/5d: Observability stack (CloudWatch dashboard + CloudTrail + Cognito backup)
+    this.observabilityStack = new ObservabilityStack(this, `${id}-observability`, {
+      config: props.config,
+      userPoolId: this.cognitoStack.userPoolId,
+      backupBucketName: this.knowledgeBaseStack.documentsBucket.bucketName,
+      backupBucketKeyArn: this.knowledgeBaseStack.documentsKey.keyArn,
+    })
+
+    // Cost tagging — tag all constructs in this stack for per-client billing breakdown
+    cdk.Tags.of(this).add("clientId", props.config.stack_name_base)
 
     // Outputs
     new cdk.CfnOutput(this, "AmplifyAppId", {
@@ -82,6 +108,14 @@ export class FastMainStack extends cdk.Stack {
       description: "Feedback API Gateway URL",
       exportName: `${props.config.stack_name_base}-FeedbackApiUrl`,
     })
+
+    if (this.backendStack.documentsApiUrl) {
+      new cdk.CfnOutput(this, "DocumentsApiUrl", {
+        value: this.backendStack.documentsApiUrl,
+        description: "Documents API Gateway URL",
+        exportName: `${props.config.stack_name_base}-DocumentsApiUrl`,
+      })
+    }
 
     new cdk.CfnOutput(this, "AmplifyConsoleUrl", {
       value: `https://console.aws.amazon.com/amplify/apps/${this.amplifyHostingStack.amplifyApp.appId}`,

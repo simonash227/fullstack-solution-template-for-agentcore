@@ -46,6 +46,11 @@ export class CognitoStack extends cdk.NestedStack {
         requireDigits: true,
         requireSymbols: true,
       },
+      mfa: cognito.Mfa.OPTIONAL,
+      mfaSecondFactor: {
+        sms: false,
+        otp: true,
+      },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       userInvitation: {

@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import traceback
 
 import boto3
@@ -15,10 +16,54 @@ from strands.models import BedrockModel
 from strands.tools.mcp import MCPClient
 from strands_code_interpreter import StrandsCodeInterpreterTools
 
+from tools.web_fetch import web_fetch
+from tools.request_approval import request_approval
+from utils.audit import log_tool_call
 from utils.auth import extract_user_id_from_context
 from utils.ssm import get_ssm_parameter
 
 app = BedrockAgentCoreApp()
+
+# System prompt cache: loaded from S3 with 5-minute TTL
+_prompt_cache: dict = {"text": None, "loaded_at": 0.0}
+PROMPT_CACHE_TTL_SECONDS = 300  # 5 minutes
+
+SYSTEM_PROMPT_BUCKET = os.environ.get(
+    "SYSTEM_PROMPT_BUCKET", "agentcore-system-prompts-059855171987"
+)
+SYSTEM_PROMPT_KEY = os.environ.get("SYSTEM_PROMPT_KEY", "system-prompt.txt")
+
+
+def get_system_prompt() -> str:
+    """
+    Fetch the system prompt from S3 with a 5-minute in-memory TTL cache.
+
+    On cache miss or expiry, reads from S3. The prompt is a text file with
+    placeholder tokens ({{AGENT_NAME}}, {{FIRM_NAME}}, etc.) that are
+    rendered per-client at deployment time — not at runtime.
+
+    Returns:
+        str: The system prompt text.
+
+    Raises:
+        ValueError: If the prompt cannot be loaded from S3.
+    """
+    now = time.time()
+    if _prompt_cache["text"] is not None and (now - _prompt_cache["loaded_at"]) < PROMPT_CACHE_TTL_SECONDS:
+        return _prompt_cache["text"]
+
+    print(f"[PROMPT] Loading system prompt from s3://{SYSTEM_PROMPT_BUCKET}/{SYSTEM_PROMPT_KEY}")
+    s3 = boto3.client("s3", region_name=os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-2"))
+    response = s3.get_object(Bucket=SYSTEM_PROMPT_BUCKET, Key=SYSTEM_PROMPT_KEY)
+    text = response["Body"].read().decode("utf-8")
+
+    if not text.strip():
+        raise ValueError("System prompt loaded from S3 is empty")
+
+    _prompt_cache["text"] = text
+    _prompt_cache["loaded_at"] = now
+    print(f"[PROMPT] Loaded {len(text)} chars, cached for {PROMPT_CACHE_TTL_SECONDS}s")
+    return text
 
 # OAuth2 Credential Provider decorator from AgentCore Identity SDK.
 # Automatically retrieves OAuth2 access tokens from the Token Vault (with caching)
@@ -96,11 +141,13 @@ def create_basic_agent(user_id: str, session_id: str) -> Agent:
     connection, and configures the agent with access to all tools available through
     the Gateway. If Gateway connection fails, it falls back to an agent without tools.
     """
-    system_prompt = """You are a helpful assistant with access to tools via the Gateway and Code Interpreter.
-    When asked about your tools, list them and explain what they do."""
+    system_prompt = get_system_prompt()
 
     bedrock_model = BedrockModel(
-        model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0", temperature=0.1
+        model_id="au.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        temperature=0.1,
+        cache_prompt="default",
+        cache_tools="default",
     )
 
     memory_id = os.environ.get("MEMORY_ID")
@@ -137,7 +184,7 @@ def create_basic_agent(user_id: str, session_id: str) -> Agent:
         agent = Agent(
             name="BasicAgent",
             system_prompt=system_prompt,
-            tools=[gateway_client, code_tools.execute_python_securely],
+            tools=[gateway_client, code_tools.execute_python_securely, web_fetch, request_approval],
             model=bedrock_model,
             session_manager=session_manager,
             trace_attributes={
@@ -196,8 +243,63 @@ async def agent_stream(payload, context: RequestContext):
         agent = create_basic_agent(user_id, session_id)
 
         # Use the agent's stream_async method for true token-level streaming
+        # Track tool calls for audit logging (Step 5b)
+        # Strands event structure:
+        #   tool_use start: event.contentBlockStart.start.toolUse.{toolUseId, name}
+        #   tool_use input: event.current_tool_use.{toolUseId, name, input} (on type=tool_use_stream)
+        #   tool_result:    message.content[].toolResult.{toolUseId, status, content}
+        pending_tool_use = {}  # tool_use_id -> {name, input}
         async for event in agent.stream_async(user_query):
-            yield json.loads(json.dumps(dict(event), default=str))
+            event_dict = dict(event)
+
+            # Capture tool_use start events (agent calling a tool)
+            block_start = (event_dict.get("event", {})
+                           .get("contentBlockStart", {})
+                           .get("start", {})
+                           .get("toolUse"))
+            if block_start:
+                tool_id = block_start.get("toolUseId", "")
+                pending_tool_use[tool_id] = {
+                    "name": block_start.get("name", "unknown"),
+                    "input": None,
+                }
+
+            # Capture streamed tool input (last event has full input)
+            current_tool = event_dict.get("current_tool_use")
+            if current_tool and current_tool.get("input"):
+                tool_id = current_tool.get("toolUseId", "")
+                if tool_id in pending_tool_use:
+                    pending_tool_use[tool_id]["input"] = current_tool.get("input")
+
+            # Capture tool_result events and log the audit record
+            message = event_dict.get("message", {})
+            if message.get("role") == "user":
+                for content_block in message.get("content", []):
+                    tool_result = content_block.get("toolResult")
+                    if tool_result:
+                        tool_id = tool_result.get("toolUseId", "")
+                        tool_info = pending_tool_use.pop(tool_id, {})
+                        tool_name = tool_info.get("name", "unknown")
+                        tool_input = tool_info.get("input")
+                        # Extract text from toolResult content blocks
+                        result_texts = [
+                            c.get("text", "") for c in tool_result.get("content", [])
+                        ]
+                        tool_output = "\n".join(result_texts)
+                        result_status = (
+                            "error" if tool_result.get("status") == "error" else "success"
+                        )
+
+                        log_tool_call(
+                            session_id=session_id,
+                            user_id=user_id,
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            tool_output=tool_output,
+                            result=result_status,
+                        )
+
+            yield json.loads(json.dumps(event_dict, default=str))
 
     except Exception as e:
         print(f"[STREAM ERROR] Error in agent_stream: {e}")

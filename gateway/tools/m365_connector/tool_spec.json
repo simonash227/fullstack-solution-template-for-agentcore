@@ -1,0 +1,116 @@
+[
+  {
+    "name": "list_emails",
+    "description": "List recent emails from a user's Microsoft 365 mailbox. Returns subject, sender, date, and a preview of each email. Use this when the user asks about their emails, inbox, or messages.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "user_email": {
+          "type": "string",
+          "description": "The email address of the user whose mailbox to search"
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of emails to return (default 10, max 25)"
+        },
+        "search_query": {
+          "type": "string",
+          "description": "Optional search query to filter emails (searches subject and body)"
+        },
+        "folder": {
+          "type": "string",
+          "description": "Mail folder to search (default 'inbox'). Options: inbox, sentItems, drafts"
+        }
+      },
+      "required": ["user_email"]
+    }
+  },
+  {
+    "name": "read_email",
+    "description": "Read the full content of a specific email by its ID. Use this after list_emails to get the complete body of an email the user wants to see.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "user_email": {
+          "type": "string",
+          "description": "The email address of the user whose mailbox contains the email"
+        },
+        "message_id": {
+          "type": "string",
+          "description": "The Microsoft Graph message ID of the email to read"
+        }
+      },
+      "required": ["user_email", "message_id"]
+    }
+  },
+  {
+    "name": "send_email",
+    "description": "Send an email on behalf of a user via Microsoft 365. IMPORTANT: Always confirm with the user before sending. Show them the recipient, subject, and body for approval first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "user_email": {
+          "type": "string",
+          "description": "The email address of the user sending the email"
+        },
+        "to": {
+          "type": "string",
+          "description": "Recipient email address"
+        },
+        "subject": {
+          "type": "string",
+          "description": "Email subject line"
+        },
+        "body": {
+          "type": "string",
+          "description": "Email body content (plain text)"
+        },
+        "cc": {
+          "type": "string",
+          "description": "Optional CC recipient email address"
+        }
+      },
+      "required": ["user_email", "to", "subject", "body"]
+    }
+  },
+  {
+    "name": "list_calendar_events",
+    "description": "List upcoming calendar events from a user's Microsoft 365 calendar. Returns event title, start/end times, location, and attendees. Use when the user asks about their schedule, meetings, or calendar.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "user_email": {
+          "type": "string",
+          "description": "The email address of the user whose calendar to check"
+        },
+        "days_ahead": {
+          "type": "integer",
+          "description": "Number of days ahead to look for events (default 7, max 30)"
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of events to return (default 10, max 25)"
+        }
+      },
+      "required": ["user_email"]
+    }
+  },
+  {
+    "name": "search_files",
+    "description": "Search for files in the user's OneDrive or SharePoint. Returns file names, paths, and last modified dates. Use when the user asks about documents stored in OneDrive or SharePoint.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "search_query": {
+          "type": "string",
+          "description": "Search query to find files by name or content"
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of files to return (default 10, max 25)"
+        }
+      },
+      "required": ["search_query"]
+    }
+  }
+]
