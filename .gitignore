@@ -28,6 +28,8 @@ notebooks/examples/data
 **/.vite
 frontend/public/aws-exports.json
 .venv
+infra-cdk/synth-*.txt
+frontend/*.zip
 scripts/zip-artifact/
 public/
 .mkdocs/public/

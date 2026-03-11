@@ -242,6 +242,24 @@ export class ObservabilityStack extends cdk.NestedStack {
       targets: [new events_targets.LambdaFunction(cognitoBackupLambda)],
     })
 
+    // ─── Cognito Backup Alarm ─────────────────────────────────────────
+    // Alert if the weekly backup fails (metric = 0 means failure)
+    const backupFailureAlarm = new cloudwatch.Alarm(this, "CognitoBackupFailureAlarm", {
+      alarmName: `${config.stack_name_base}-cognito-backup-failure`,
+      metric: new cloudwatch.Metric({
+        namespace: "AgentCore/Operations",
+        metricName: "CognitoBackupSuccess",
+        statistic: "Minimum",
+        period: cdk.Duration.days(1),
+        dimensionsMap: { StackName: config.stack_name_base },
+      }),
+      threshold: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      evaluationPeriods: 1,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING,
+      alarmDescription: "Cognito user pool backup failed or did not run",
+    })
+
     // Row 4: Lambda metrics for feedback and documents APIs
     dashboard.addWidgets(
       new cloudwatch.GraphWidget({

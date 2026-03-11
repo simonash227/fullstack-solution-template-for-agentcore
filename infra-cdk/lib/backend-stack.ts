@@ -255,7 +255,7 @@ export class BackendStack extends cdk.NestedStack {
       type: "AWS::BedrockAgentCore::Memory",
       properties: {
         Name: cdk.Names.uniqueResourceName(this, { maxLength: 48 }),
-        EventExpiryDuration: 30,
+        EventExpiryDuration: 365,
         Description: `Short-term memory for ${config.stack_name_base} agent`,
         MemoryStrategies: [], // Empty array = short-term only (conversation history)
         MemoryExecutionRoleArn: agentRole.roleArn,
