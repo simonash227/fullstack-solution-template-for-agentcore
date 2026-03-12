@@ -7,6 +7,7 @@ import * as iam from "aws-cdk-lib/aws-iam"
 import * as kms from "aws-cdk-lib/aws-kms"
 import * as lambda from "aws-cdk-lib/aws-lambda"
 import * as logs from "aws-cdk-lib/aws-logs"
+import * as oam from "aws-cdk-lib/aws-oam"
 import * as s3 from "aws-cdk-lib/aws-s3"
 import { PythonFunction } from "@aws-cdk/aws-lambda-python-alpha"
 import { Construct } from "constructs"
@@ -18,6 +19,7 @@ export interface ObservabilityStackProps extends cdk.NestedStackProps {
   userPoolId: string
   backupBucketName: string
   backupBucketKeyArn: string
+  monitoringSinkArn?: string | null
 }
 
 export class ObservabilityStack extends cdk.NestedStack {
@@ -260,7 +262,96 @@ export class ObservabilityStack extends cdk.NestedStack {
       alarmDescription: "Cognito user pool backup failed or did not run",
     })
 
-    // Row 4: Lambda metrics for feedback and documents APIs
+    // Row 4: Evaluation quality metrics (Step 11 — AgentCore Evaluations)
+    // Metrics appear in Bedrock-AgentCore/Evaluations namespace once evaluations run.
+    // Evaluation config is created via scripts/setup-evaluations.py (no CDK construct).
+    dashboard.addWidgets(
+      new cloudwatch.GraphWidget({
+        title: "Evaluation Scores (Avg)",
+        left: [
+          new cloudwatch.Metric({
+            namespace: "Bedrock-AgentCore/Evaluations",
+            metricName: "EvaluationScore",
+            statistic: "Average",
+            period: cdk.Duration.hours(1),
+            dimensionsMap: { EvaluatorId: "Builtin.Correctness" },
+            label: "Correctness",
+          }),
+          new cloudwatch.Metric({
+            namespace: "Bedrock-AgentCore/Evaluations",
+            metricName: "EvaluationScore",
+            statistic: "Average",
+            period: cdk.Duration.hours(1),
+            dimensionsMap: { EvaluatorId: "Builtin.Faithfulness" },
+            label: "Faithfulness",
+          }),
+          new cloudwatch.Metric({
+            namespace: "Bedrock-AgentCore/Evaluations",
+            metricName: "EvaluationScore",
+            statistic: "Average",
+            period: cdk.Duration.hours(1),
+            dimensionsMap: { EvaluatorId: "Builtin.Helpfulness" },
+            label: "Helpfulness",
+          }),
+          new cloudwatch.Metric({
+            namespace: "Bedrock-AgentCore/Evaluations",
+            metricName: "EvaluationScore",
+            statistic: "Average",
+            period: cdk.Duration.hours(1),
+            dimensionsMap: { EvaluatorId: "Builtin.GoalSuccessRate" },
+            label: "Goal Success",
+          }),
+        ],
+        width: 12,
+      }),
+      new cloudwatch.GraphWidget({
+        title: "Tool Evaluation Scores (Avg)",
+        left: [
+          new cloudwatch.Metric({
+            namespace: "Bedrock-AgentCore/Evaluations",
+            metricName: "EvaluationScore",
+            statistic: "Average",
+            period: cdk.Duration.hours(1),
+            dimensionsMap: { EvaluatorId: "Builtin.ToolSelectionAccuracy" },
+            label: "Tool Selection",
+          }),
+          new cloudwatch.Metric({
+            namespace: "Bedrock-AgentCore/Evaluations",
+            metricName: "EvaluationScore",
+            statistic: "Average",
+            period: cdk.Duration.hours(1),
+            dimensionsMap: { EvaluatorId: "Builtin.ToolParameterAccuracy" },
+            label: "Tool Parameters",
+          }),
+          new cloudwatch.Metric({
+            namespace: "Bedrock-AgentCore/Evaluations",
+            metricName: "EvaluationScore",
+            statistic: "Average",
+            period: cdk.Duration.hours(1),
+            dimensionsMap: { EvaluatorId: "Builtin.Harmfulness" },
+            label: "Harmfulness (lower=better)",
+          }),
+        ],
+        width: 12,
+      })
+    )
+
+    // ─── CloudWatch OAM Link (Step 12 — Cross-Account Monitoring) ─────
+    // Links this client account to Simon's central monitoring account.
+    // The monitoring account's OAM sink must exist first (manual step).
+    if (props.monitoringSinkArn) {
+      new oam.CfnLink(this, "OamLink", {
+        labelTemplate: "$AccountName",
+        resourceTypes: [
+          "AWS::CloudWatch::Metric",
+          "AWS::Logs::LogGroup",
+        ],
+        sinkIdentifier: props.monitoringSinkArn,
+        tags: { clientId: config.stack_name_base },
+      })
+    }
+
+    // Row 5: Lambda metrics for feedback and documents APIs
     dashboard.addWidgets(
       new cloudwatch.GraphWidget({
         title: "Lambda Errors (Feedback + Documents)",

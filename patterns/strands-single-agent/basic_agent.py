@@ -5,7 +5,7 @@ import traceback
 
 import boto3
 from bedrock_agentcore.identity.auth import requires_access_token
-from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
+from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig, RetrievalConfig
 from bedrock_agentcore.memory.integrations.strands.session_manager import (
     AgentCoreMemorySessionManager,
 )
@@ -24,45 +24,48 @@ from utils.ssm import get_ssm_parameter
 
 app = BedrockAgentCoreApp()
 
-# System prompt cache: loaded from S3 with 5-minute TTL
+# System prompt cache: assembled from workspace S3 files with 5-minute TTL
 _prompt_cache: dict = {"text": None, "loaded_at": 0.0}
 PROMPT_CACHE_TTL_SECONDS = 300  # 5 minutes
 
-SYSTEM_PROMPT_BUCKET = os.environ.get(
-    "SYSTEM_PROMPT_BUCKET", "agentcore-system-prompts-059855171987"
-)
-SYSTEM_PROMPT_KEY = os.environ.get("SYSTEM_PROMPT_KEY", "system-prompt.txt")
+WORKSPACE_BUCKET = os.environ.get("WORKSPACE_BUCKET", "")
+WORKSPACE_PREFIX = os.environ.get("WORKSPACE_PREFIX", "agent-workspace/")
 
 
 def get_system_prompt() -> str:
     """
-    Fetch the system prompt from S3 with a 5-minute in-memory TTL cache.
+    Assemble the system prompt from workspace files in S3 with a 5-minute TTL cache.
 
-    On cache miss or expiry, reads from S3. The prompt is a text file with
-    placeholder tokens ({{AGENT_NAME}}, {{FIRM_NAME}}, etc.) that are
-    rendered per-client at deployment time — not at runtime.
+    Reads base-persona.md and map.md from the agent-workspace/ prefix, concatenates
+    them, and caches the result. Placeholder tokens ({{AGENT_NAME}}, {{FIRM_NAME}}, etc.)
+    are rendered at deploy time by assemble-workspace.py — not at runtime.
 
     Returns:
-        str: The system prompt text.
+        str: The assembled system prompt text.
 
     Raises:
-        ValueError: If the prompt cannot be loaded from S3.
+        ValueError: If workspace files cannot be loaded from S3.
     """
     now = time.time()
     if _prompt_cache["text"] is not None and (now - _prompt_cache["loaded_at"]) < PROMPT_CACHE_TTL_SECONDS:
         return _prompt_cache["text"]
 
-    print(f"[PROMPT] Loading system prompt from s3://{SYSTEM_PROMPT_BUCKET}/{SYSTEM_PROMPT_KEY}")
     s3 = boto3.client("s3", region_name=os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-2"))
-    response = s3.get_object(Bucket=SYSTEM_PROMPT_BUCKET, Key=SYSTEM_PROMPT_KEY)
-    text = response["Body"].read().decode("utf-8")
+    parts = []
+    for key in ["base-persona.md", "map.md"]:
+        full_key = f"{WORKSPACE_PREFIX}{key}"
+        print(f"[PROMPT] Loading s3://{WORKSPACE_BUCKET}/{full_key}")
+        response = s3.get_object(Bucket=WORKSPACE_BUCKET, Key=full_key)
+        parts.append(response["Body"].read().decode("utf-8"))
+
+    text = "\n\n".join(parts)
 
     if not text.strip():
-        raise ValueError("System prompt loaded from S3 is empty")
+        raise ValueError("Assembled system prompt is empty")
 
     _prompt_cache["text"] = text
     _prompt_cache["loaded_at"] = now
-    print(f"[PROMPT] Loaded {len(text)} chars, cached for {PROMPT_CACHE_TTL_SECONDS}s")
+    print(f"[PROMPT] Assembled {len(text)} chars from workspace, cached for {PROMPT_CACHE_TTL_SECONDS}s")
     return text
 
 # OAuth2 Credential Provider decorator from AgentCore Identity SDK.
@@ -154,9 +157,15 @@ def create_basic_agent(user_id: str, session_id: str) -> Agent:
     if not memory_id:
         raise ValueError("MEMORY_ID environment variable is required")
 
-    # Configure AgentCore Memory
+    # Configure AgentCore Memory with long-term retrieval strategies
     agentcore_memory_config = AgentCoreMemoryConfig(
-        memory_id=memory_id, session_id=session_id, actor_id=user_id
+        memory_id=memory_id,
+        session_id=session_id,
+        actor_id=user_id,
+        retrieval_config={
+            "/preferences/{actorId}": RetrievalConfig(top_k=5, relevance_score=0.7),
+            "/facts/{actorId}": RetrievalConfig(top_k=10, relevance_score=0.3),
+        },
     )
 
     session_manager = AgentCoreMemorySessionManager(

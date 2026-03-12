@@ -29,6 +29,27 @@ export interface Citation {
   relevance_score: number
 }
 
+// Workflow tracking types
+export type WorkflowStepStatus = "in_progress" | "complete" | "pending_approval" | "failed"
+
+export interface WorkflowStep {
+  stepId: string
+  label: string
+  status: WorkflowStepStatus
+  link?: string
+  error?: string
+  requiresApproval?: boolean
+}
+
+export interface WorkflowEvent {
+  type: "STEP_START" | "STEP_COMPLETE" | "STEP_PENDING" | "STEP_FAILED"
+  stepId: string
+  label?: string
+  link?: string
+  error?: string
+  requiresApproval?: boolean
+}
+
 // Define chat session types
 export interface ChatSession {
   id: string

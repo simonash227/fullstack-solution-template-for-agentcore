@@ -7,6 +7,13 @@ import { FeedbackDialog } from "./FeedbackDialog"
 import { getToolRenderer } from "@/hooks/useToolRenderer"
 import { MarkdownRenderer } from "./MarkdownRenderer"
 import { ApprovalCard, parseApprovalRequest } from "./ApprovalCard"
+import { WorkflowTracker } from "./WorkflowTracker"
+import {
+  collectWorkflowEventsFromSegments,
+  buildWorkflowSteps,
+  stripWorkflowBlocks,
+  parseWorkflowEvents,
+} from "./workflowParser"
 
 // Matches the formatted output from the KB search Lambda:
 // [Source: filename.pdf, relevance: 0.85]\nchunk text\n\n
@@ -45,6 +52,15 @@ export function ChatMessage({ message, sessionId: _sessionId, onFeedbackSubmit, 
   )
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false)
 
+  // Extract workflow steps from all text segments
+  const workflowSteps = useMemo(() => {
+    if (message.role !== "assistant") return []
+    const events = message.segments
+      ? collectWorkflowEventsFromSegments(message.segments)
+      : parseWorkflowEvents(message.content)
+    return buildWorkflowSteps(events)
+  }, [message.segments, message.content, message.role])
+
   // Extract citations from search_documents tool results in this message
   const citations = useMemo<Citation[]>(() => {
     if (!message.segments) return []
@@ -77,20 +93,41 @@ export function ChatMessage({ message, sessionId: _sessionId, onFeedbackSubmit, 
   }
 
   const renderAssistantContent = () => {
+    const tracker = workflowSteps.length > 0 ? (
+      <WorkflowTracker
+        steps={workflowSteps}
+        onApprove={(stepId) => onSendMessage?.(`Approved step: ${stepId}. Go ahead.`)}
+        onReject={(stepId) => onSendMessage?.(`Rejected step: ${stepId}. Do not proceed.`)}
+        onRetry={(stepId) => onSendMessage?.(`Please retry step: ${stepId}.`)}
+      />
+    ) : null;
+
     // If segments exist, render them in order (interleaved text + tools)
     if (message.segments && message.segments.length > 0) {
-      return message.segments.map((seg, i) => {
+      let trackerRendered = false;
+      const elements = message.segments.map((seg, i) => {
         if (seg.type === "text") {
+          // Strip workflow blocks from display text
+          let displayText = stripWorkflowBlocks(seg.content);
+
+          // Show tracker before first text segment that had workflow blocks
+          const hadWorkflow = displayText !== seg.content;
+          let trackerElement = null;
+          if (hadWorkflow && !trackerRendered && tracker) {
+            trackerRendered = true;
+            trackerElement = tracker;
+          }
+
           // Check if this text contains an approval request
-          const approval = parseApprovalRequest(seg.content);
+          const approval = parseApprovalRequest(displayText);
           if (approval) {
-            // Render the approval card, plus any text after the approval block
-            const afterApproval = seg.content.replace(
+            const afterApproval = displayText.replace(
               /\[APPROVAL_REQUIRED\][\s\S]*?\[\/APPROVAL_REQUIRED\]\s*/,
               ""
             ).trim();
             return (
               <div key={i}>
+                {trackerElement}
                 <ApprovalCard
                   actionType={approval.actionType}
                   summary={approval.summary}
@@ -102,7 +139,17 @@ export function ChatMessage({ message, sessionId: _sessionId, onFeedbackSubmit, 
               </div>
             );
           }
-          return <MarkdownRenderer key={i} content={seg.content} citations={citations} />;
+
+          if (!displayText) {
+            return trackerElement ? <div key={i}>{trackerElement}</div> : null;
+          }
+
+          return (
+            <div key={i}>
+              {trackerElement}
+              <MarkdownRenderer content={displayText} citations={citations} />
+            </div>
+          );
         }
         const render = getToolRenderer(seg.toolCall.name);
         if (!render) return null;
@@ -112,16 +159,26 @@ export function ChatMessage({ message, sessionId: _sessionId, onFeedbackSubmit, 
           </div>
         );
       });
+
+      // If tracker hasn't been placed yet (workflow events in later segments), append at end
+      if (!trackerRendered && tracker) {
+        elements.push(<div key="workflow-tracker">{tracker}</div>);
+      }
+
+      return elements;
     }
-    // Fallback: check plain content for approval request
-    const approval = parseApprovalRequest(message.content);
+
+    // Fallback: plain content
+    const displayText = stripWorkflowBlocks(message.content);
+    const approval = parseApprovalRequest(displayText);
     if (approval) {
-      const afterApproval = message.content.replace(
+      const afterApproval = displayText.replace(
         /\[APPROVAL_REQUIRED\][\s\S]*?\[\/APPROVAL_REQUIRED\]\s*/,
         ""
       ).trim();
       return (
         <div>
+          {tracker}
           <ApprovalCard
             actionType={approval.actionType}
             summary={approval.summary}
@@ -133,7 +190,12 @@ export function ChatMessage({ message, sessionId: _sessionId, onFeedbackSubmit, 
         </div>
       );
     }
-    return <MarkdownRenderer content={message.content} citations={citations} />;
+    return (
+      <div>
+        {tracker}
+        <MarkdownRenderer content={displayText} citations={citations} />
+      </div>
+    );
   };
 
   return (

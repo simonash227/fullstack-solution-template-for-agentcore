@@ -4,6 +4,9 @@ stack_name_base: FAST-stack
 # If not provided, you'll need to manually create users via AWS Console
 admin_user_email: simonbarbarash@gmail.com
 
+# Cross-account monitoring: OAM sink ARN in the monitoring account
+monitoring_sink_arn: "arn:aws:oam:ap-southeast-2:602664593778:sink/efdf68e2-c136-454b-98d0-8cbb049d0f88"
+
 backend:
   pattern: strands-single-agent # Available patterns: strands-single-agent, langgraph-single-agent
   deployment_type: docker # Available deployment types: docker (default), zip

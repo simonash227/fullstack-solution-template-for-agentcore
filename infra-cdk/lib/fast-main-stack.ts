@@ -55,12 +55,13 @@ export class FastMainStack extends cdk.Stack {
       documentsKeyArn: this.knowledgeBaseStack.documentsKey.keyArn,
     })
 
-    // Step 5c/5d: Observability stack (CloudWatch dashboard + CloudTrail + Cognito backup)
+    // Step 5c/5d: Observability stack (CloudWatch dashboard + CloudTrail + Cognito backup + OAM link)
     this.observabilityStack = new ObservabilityStack(this, `${id}-observability`, {
       config: props.config,
       userPoolId: this.cognitoStack.userPoolId,
       backupBucketName: this.knowledgeBaseStack.documentsBucket.bucketName,
       backupBucketKeyArn: this.knowledgeBaseStack.documentsKey.keyArn,
+      monitoringSinkArn: props.config.monitoring_sink_arn,
     })
 
     // Cost tagging — tag all constructs in this stack for per-client billing breakdown

@@ -1,26 +1,31 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { ChatHeader } from "./ChatHeader"
 import { ChatInput } from "./ChatInput"
 import { ChatMessages } from "./ChatMessages"
 import { QuickActions } from "./QuickActions"
 import { Message, MessageSegment, ToolCall } from "./types"
 
 import { useGlobal } from "@/app/context/GlobalContext"
+import { useChat } from "@/app/context/ChatContext"
 import { AgentCoreClient } from "@/lib/agentcore-client"
 import type { AgentPattern } from "@/lib/agentcore-client"
 import { submitFeedback } from "@/services/feedbackService"
 import { useAuth } from "react-oidc-context"
 import { useDefaultTool } from "@/hooks/useToolRenderer"
 import { ToolCallDisplay } from "./ToolCallDisplay"
+import { ErrorBanner } from "@/components/shared/ErrorBanner"
+import { AgentStatus } from "@/components/shared/AgentStatus"
+import { Button } from "@/components/ui/button"
+import { Plus } from "lucide-react"
 
 export default function ChatInterface() {
-  const [messages, setMessages] = useState<Message[]>([])
+  const { activeConversationId, activeMessages: messages, setActiveMessages: setMessages, startNewConversation } = useChat()
   const [input, setInput] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [client, setClient] = useState<AgentCoreClient | null>(null)
-  const [sessionId] = useState(() => crypto.randomUUID())
+  // Use conversation ID as session ID so AgentCore Memory tracks the same conversation
+  const sessionId = activeConversationId || ""
   const [branding, setBranding] = useState<{
     primaryColour?: string
     logoUrl?: string | null
@@ -28,6 +33,7 @@ export default function ChatInterface() {
     agentName?: string
   }>({})
   const [quickActions, setQuickActions] = useState<string[]>([])
+  const [activeToolName, setActiveToolName] = useState<string | null>(null)
 
   const { isLoading, setIsLoading } = useGlobal()
   const auth = useAuth()
@@ -174,6 +180,7 @@ export default function ChatInterface() {
               };
               toolCallMap.set(event.toolUseId, tc);
               segments.push({ type: "tool", toolCall: tc });
+              setActiveToolName(event.name);
               updateMessage();
               break;
             }
@@ -223,6 +230,7 @@ export default function ChatInterface() {
       })
     } finally {
       setIsLoading(false)
+      setActiveToolName(null)
     }
   }
 
@@ -265,13 +273,11 @@ export default function ChatInterface() {
     }
   }
 
-  // Start a new chat (generates new session ID)
+  // Start a new chat (creates new conversation with new session ID)
   const startNewChat = () => {
-    setMessages([])
+    startNewConversation()
     setInput("")
     setError(null)
-    // Note: sessionId stays the same for the component lifecycle
-    // If you want a new session ID, you'd need to remount the component
   }
 
   // Check if this is the initial state (no messages)
@@ -281,30 +287,31 @@ export default function ChatInterface() {
   const hasAssistantMessages = messages.some((message) => message.role === "assistant")
 
   return (
-    <div className="flex flex-col h-screen w-full">
-      {/* Fixed header */}
-      <div className="flex-none">
-        <ChatHeader
-          onNewChat={startNewChat}
-          canStartNewChat={hasAssistantMessages}
-          title={branding.agentName ? `${branding.agentName} — ${branding.firmName || ""}` : undefined}
-          logoUrl={branding.logoUrl}
+    <div className="flex flex-col h-full w-full">
+      {/* New chat button */}
+      {hasAssistantMessages && (
+        <div className="flex-none flex justify-end px-4 pt-2">
+          <Button onClick={startNewChat} variant="outline" size="sm" className="gap-1.5">
+            <Plus className="h-4 w-4" />
+            New Chat
+          </Button>
+        </div>
+      )}
+
+      {/* Error banner */}
+      {error && (
+        <ErrorBanner
+          message={error}
+          onDismiss={() => setError(null)}
         />
-        {error && (
-          <div className="bg-red-50 border-l-4 border-red-500 p-4 mx-4 mt-2">
-            <p className="text-sm text-red-700">{error}</p>
-          </div>
-        )}
-      </div>
+      )}
 
       {/* Conditional layout based on whether there are messages */}
       {isInitialState ? (
         // Initial state - input in the middle
         <>
-          {/* Empty space above */}
           <div className="grow" />
 
-          {/* Centered welcome message */}
           <div className="text-center mb-6">
             {branding.logoUrl && (
               <img
@@ -325,7 +332,6 @@ export default function ChatInterface() {
             </p>
           </div>
 
-          {/* Quick actions */}
           {quickActions.length > 0 && (
             <div className="mb-6">
               <QuickActions
@@ -335,7 +341,6 @@ export default function ChatInterface() {
             </div>
           )}
 
-          {/* Centered input */}
           <div className="px-4 mb-16 max-w-4xl mx-auto w-full">
             <ChatInput
               input={input}
@@ -345,13 +350,11 @@ export default function ChatInterface() {
             />
           </div>
 
-          {/* Empty space below */}
           <div className="grow" />
         </>
       ) : (
         // Chat in progress - normal layout
         <>
-          {/* Scrollable message area */}
           <div className="grow overflow-hidden">
             <div className="max-w-4xl mx-auto w-full h-full">
               <ChatMessages
@@ -364,7 +367,11 @@ export default function ChatInterface() {
             </div>
           </div>
 
-          {/* Fixed input area at bottom */}
+          {/* Agent status indicator */}
+          <div className="flex-none max-w-4xl mx-auto w-full">
+            <AgentStatus isLoading={isLoading} activeToolName={activeToolName} />
+          </div>
+
           <div className="flex-none">
             <div className="max-w-4xl mx-auto w-full">
               <ChatInput

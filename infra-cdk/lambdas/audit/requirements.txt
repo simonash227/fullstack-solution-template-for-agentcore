@@ -1,0 +1,2 @@
+# Boto3 is included in the Python Lambda runtime.
+# Powertools installed as a Lambda layer via CDK.

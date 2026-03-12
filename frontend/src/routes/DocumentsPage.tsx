@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useRef, useCallback } from "react"
 import { useAuth } from "@/hooks/useAuth"
-import { GlobalContextProvider } from "@/app/context/GlobalContext"
 import { Button } from "@/components/ui/button"
 import {
   Upload,
@@ -11,7 +10,6 @@ import {
   FileText,
   ArrowUpDown,
   RefreshCw,
-  ArrowLeft,
 } from "lucide-react"
 import {
   listDocuments,
@@ -20,7 +18,8 @@ import {
   getDownloadUrl,
   type DocumentItem,
 } from "@/services/documentsService"
-import { useNavigate } from "react-router-dom"
+import { ErrorBanner } from "@/components/shared/ErrorBanner"
+import { EmptyState } from "@/components/shared/EmptyState"
 
 type SortField = "name" | "lastModified" | "size"
 type SortDir = "asc" | "desc"
@@ -44,7 +43,6 @@ function formatDate(iso: string): string {
 
 function DocumentsContent() {
   const { token, isAuthenticated, signIn } = useAuth()
-  const navigate = useNavigate()
 
   const [documents, setDocuments] = useState<DocumentItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -150,22 +148,12 @@ function DocumentsContent() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <div className="bg-white border-b px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => navigate("/")}
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-            title="Back to Chat"
-          >
-            <ArrowLeft size={20} />
-          </button>
-          <h1 className="text-xl font-semibold">Documents</h1>
-          <span className="text-sm text-gray-500">
-            {documents.length} file{documents.length !== 1 ? "s" : ""}
-          </span>
-        </div>
+    <div className="flex flex-col h-full bg-gray-50">
+      {/* Toolbar */}
+      <div className="flex items-center justify-between px-6 py-3 bg-white border-b">
+        <span className="text-sm text-gray-500">
+          {documents.length} file{documents.length !== 1 ? "s" : ""}
+        </span>
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
@@ -195,9 +183,11 @@ function DocumentsContent() {
 
       {/* Error banner */}
       {error && (
-        <div className="bg-red-50 border-l-4 border-red-500 p-4 mx-6 mt-4">
-          <p className="text-sm text-red-700">{error}</p>
-        </div>
+        <ErrorBanner
+          message={error}
+          onRetry={loadDocuments}
+          onDismiss={() => setError(null)}
+        />
       )}
 
       {/* Upload progress */}
@@ -219,27 +209,19 @@ function DocumentsContent() {
       )}
 
       {/* Document list */}
-      <div className="mx-6 mt-4">
+      <div className="flex-1 overflow-auto mx-6 mt-4">
         {loading && documents.length === 0 ? (
           <div className="text-center py-12 text-gray-500">
             Loading documents...
           </div>
         ) : documents.length === 0 ? (
-          <div className="text-center py-12">
-            <FileText size={48} className="mx-auto text-gray-300 mb-4" />
-            <p className="text-gray-500 text-lg">No documents yet</p>
-            <p className="text-gray-400 text-sm mt-1">
-              Upload contracts, board papers, financials — your agent will be
-              able to search and cite them.
-            </p>
-            <Button
-              className="mt-4"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <Upload size={16} className="mr-1" />
-              Upload your first document
-            </Button>
-          </div>
+          <EmptyState
+            icon={FileText}
+            title="No documents yet"
+            description="Upload contracts, board papers, financials — your agent will be able to search and cite them."
+            actionLabel="Upload your first document"
+            onAction={() => fileInputRef.current?.click()}
+          />
         ) : (
           <div className="bg-white rounded-lg border overflow-hidden">
             <table className="w-full text-sm">
@@ -366,9 +348,5 @@ function DocumentsContent() {
 }
 
 export default function DocumentsPage() {
-  return (
-    <GlobalContextProvider>
-      <DocumentsContent />
-    </GlobalContextProvider>
-  )
+  return <DocumentsContent />
 }

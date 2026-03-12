@@ -39,6 +39,7 @@ export class BackendStack extends cdk.NestedStack {
   public readonly userPoolDomain: cognito.UserPoolDomain
   public feedbackApiUrl: string
   public documentsApiUrl: string
+  public auditApiUrl: string
   public runtimeArn: string
   public memoryArn: string
   private agentName: cdk.CfnParameter
@@ -49,9 +50,15 @@ export class BackendStack extends cdk.NestedStack {
   private agentRuntime: agentcore.Runtime
   private agentRole: iam.IRole
   private restApi: apigateway.RestApi
+  private documentsBucketName?: string
+  private documentsKeyArn?: string
 
   constructor(scope: Construct, id: string, props: BackendStackProps) {
     super(scope, id, props)
+
+    // Store for use in private methods
+    this.documentsBucketName = props.documentsBucketName
+    this.documentsKeyArn = props.documentsKeyArn
 
     // Store the Cognito values
     this.userPoolId = props.userPoolId
@@ -112,9 +119,17 @@ export class BackendStack extends cdk.NestedStack {
     // Create Health endpoint (Step 5e — client health check)
     this.createHealthEndpoint(props.config, props.knowledgeBaseId)
 
+    // Create Audit API (Step 7 — action log panel)
+    this.createAuditApi(props.config, props.frontendUrl, auditTable)
+
     // Create Documents API (Step 3d — document management panel)
     if (props.documentsBucketArn && props.knowledgeBaseId && props.dataSourceId) {
       this.createDocumentsApi(props.config, props.frontendUrl, props)
+    }
+
+    // Create Knowledge API (Step 12c — "What I Know" page)
+    if (props.documentsBucketName) {
+      this.createKnowledgeApi(props.config, props.frontendUrl)
     }
   }
 
@@ -249,15 +264,37 @@ export class BackendStack extends cdk.NestedStack {
     const agentRole = new AgentCoreRole(this, "AgentCoreRole")
     this.agentRole = agentRole
 
-    // Create memory resource with short-term memory (conversation history) as default
-    // To enable long-term strategies (summaries, preferences, facts), see docs/MEMORY_INTEGRATION.md
+    // Create memory resource with short-term + long-term strategies
+    // Short-term: conversation history (automatic). Long-term: summaries, preferences, facts.
     const memory = new cdk.CfnResource(this, "AgentMemory", {
       type: "AWS::BedrockAgentCore::Memory",
       properties: {
         Name: cdk.Names.uniqueResourceName(this, { maxLength: 48 }),
         EventExpiryDuration: 365,
-        Description: `Short-term memory for ${config.stack_name_base} agent`,
-        MemoryStrategies: [], // Empty array = short-term only (conversation history)
+        Description: `Agent memory for ${config.stack_name_base} with long-term strategies`,
+        MemoryStrategies: [
+          {
+            SummaryMemoryStrategy: {
+              Name: "SessionSummarizer",
+              Description: "Auto-summarises each conversation session",
+              Namespaces: ["/summaries/{actorId}/{sessionId}"],
+            },
+          },
+          {
+            UserPreferenceMemoryStrategy: {
+              Name: "PreferenceLearner",
+              Description: "Learns user communication and workflow preferences",
+              Namespaces: ["/preferences/{actorId}"],
+            },
+          },
+          {
+            SemanticMemoryStrategy: {
+              Name: "FactExtractor",
+              Description: "Extracts key facts, entities, and decisions",
+              Namespaces: ["/facts/{actorId}"],
+            },
+          },
+        ],
         MemoryExecutionRoleArn: agentRole.roleArn,
         Tags: {
           Name: `${config.stack_name_base}_Memory`,
@@ -297,6 +334,28 @@ export class BackendStack extends cdk.NestedStack {
         ],
       })
     )
+
+    // Add S3 read access for workspace files (system prompt assembly at runtime start)
+    if (this.documentsBucketName) {
+      agentRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: "WorkspacePromptRead",
+          effect: iam.Effect.ALLOW,
+          actions: ["s3:GetObject"],
+          resources: [`arn:aws:s3:::${this.documentsBucketName}/agent-workspace/base-persona.md`, `arn:aws:s3:::${this.documentsBucketName}/agent-workspace/map.md`],
+        })
+      )
+      if (this.documentsKeyArn) {
+        agentRole.addToPolicy(
+          new iam.PolicyStatement({
+            sid: "WorkspacePromptKMS",
+            effect: iam.Effect.ALLOW,
+            actions: ["kms:Decrypt"],
+            resources: [this.documentsKeyArn],
+          })
+        )
+      }
+    }
 
     // Add Code Interpreter permissions
     agentRole.addToPolicy(
@@ -349,6 +408,7 @@ export class BackendStack extends cdk.NestedStack {
     )
 
     // Environment variables for the runtime
+    const workspaceBucketName = this.documentsBucketName || ""
     const envVars: { [key: string]: string } = {
       AWS_REGION: stack.region,
       AWS_DEFAULT_REGION: stack.region,
@@ -356,6 +416,8 @@ export class BackendStack extends cdk.NestedStack {
       STACK_NAME: config.stack_name_base,
       GATEWAY_CREDENTIAL_PROVIDER_NAME: `${config.stack_name_base}-runtime-gateway-auth`, // Used by @requires_access_token decorator to look up the correct provider
       AUDIT_TABLE_NAME: `${config.stack_name_base}-audit`, // Step 5b: DynamoDB audit table for tool call logging
+      WORKSPACE_BUCKET: workspaceBucketName, // Step 12c: workspace files live in documents bucket
+      WORKSPACE_PREFIX: "agent-workspace/", // Step 12c: S3 prefix for workspace files
     }
 
     // Create the runtime using L2 construct
@@ -642,6 +704,16 @@ export class BackendStack extends cdk.NestedStack {
         ),
         accessLogFormat: apigateway.AccessLogFormat.jsonWithStandardFields(),
         tracingEnabled: true,
+        methodOptions: {
+          // Disable caching for audit endpoint (query params vary per request)
+          "/audit/GET": {
+            cachingEnabled: false,
+          },
+          // Disable caching for health endpoint
+          "/health/GET": {
+            cachingEnabled: false,
+          },
+        },
       },
     })
     const api = this.restApi
@@ -678,6 +750,70 @@ export class BackendStack extends cdk.NestedStack {
       stringValue: api.url,
       description: "Feedback API Gateway URL",
     })
+  }
+
+  /**
+   * Step 7: Audit API — query action log records for the Action Log panel.
+   * Uses the existing REST API (shared with feedback/health) and adds a /audit GET route.
+   */
+  private createAuditApi(
+    config: AppConfig,
+    frontendUrl: string,
+    auditTable: dynamodb.Table
+  ): void {
+    const auditLambda = new PythonFunction(this, "AuditLambda", {
+      functionName: `${config.stack_name_base}-audit`,
+      runtime: lambda.Runtime.PYTHON_3_13,
+      architecture: lambda.Architecture.ARM_64,
+      entry: path.join(__dirname, "..", "lambdas", "audit"),
+      handler: "handler",
+      environment: {
+        TABLE_NAME: auditTable.tableName,
+        CORS_ALLOWED_ORIGINS: `${frontendUrl},http://localhost:3000`,
+      },
+      timeout: cdk.Duration.seconds(30),
+      layers: [
+        lambda.LayerVersion.fromLayerVersionArn(
+          this,
+          "AuditPowertoolsLayer",
+          `arn:aws:lambda:${
+            cdk.Stack.of(this).region
+          }:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-arm64:18`
+        ),
+      ],
+      logGroup: new logs.LogGroup(this, "AuditLambdaLogGroup", {
+        logGroupName: `/aws/lambda/${config.stack_name_base}-audit`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
+
+    // Grant read-only access to audit table
+    auditTable.grantReadData(auditLambda)
+
+    // Add /audit resource to the existing REST API with Cognito auth
+    const auditAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(
+      this,
+      "AuditApiAuthorizer",
+      {
+        cognitoUserPools: [this.userPool],
+        identitySource: "method.request.header.Authorization",
+        authorizerName: `${config.stack_name_base}-audit-authorizer`,
+      }
+    )
+
+    const auditResource = this.restApi.root.addResource("audit")
+    auditResource.addMethod(
+      "GET",
+      new apigateway.LambdaIntegration(auditLambda),
+      {
+        authorizer: auditAuthorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    )
+
+    // The audit endpoint lives on the same API as feedback
+    this.auditApiUrl = this.restApi.url
   }
 
   // Step 5e: Health endpoint — secured with API key, not Cognito.
@@ -886,6 +1022,127 @@ export class BackendStack extends cdk.NestedStack {
     })
   }
 
+  /**
+   * Step 12c-v: Knowledge API — "What I Know" page CRUD for learned knowledge.
+   */
+  private createKnowledgeApi(config: AppConfig, frontendUrl: string): void {
+    const knowledgeLambda = new PythonFunction(this, "KnowledgeLambda", {
+      functionName: `${config.stack_name_base}-knowledge`,
+      runtime: lambda.Runtime.PYTHON_3_13,
+      architecture: lambda.Architecture.ARM_64,
+      entry: path.join(__dirname, "..", "lambdas", "knowledge"),
+      handler: "handler",
+      environment: {
+        BUCKET_NAME: this.documentsBucketName!,
+        KMS_KEY_ARN: this.documentsKeyArn || "",
+        WORKSPACE_PREFIX: "agent-workspace/",
+        CORS_ALLOWED_ORIGINS: `${frontendUrl},http://localhost:3000`,
+      },
+      timeout: cdk.Duration.seconds(15),
+      layers: [
+        lambda.LayerVersion.fromLayerVersionArn(
+          this,
+          "KnowledgePowertoolsLayer",
+          `arn:aws:lambda:${
+            cdk.Stack.of(this).region
+          }:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-arm64:18`
+        ),
+      ],
+      logGroup: new logs.LogGroup(this, "KnowledgeLambdaLogGroup", {
+        logGroupName: `/aws/lambda/${config.stack_name_base}-knowledge`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
+
+    // S3: read all workspace files, write only to learned/active/
+    knowledgeLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "KnowledgeRead",
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:GetObject"],
+        resources: [`arn:aws:s3:::${this.documentsBucketName}/agent-workspace/learned/active/*`],
+      })
+    )
+    knowledgeLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "KnowledgeWrite",
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:PutObject"],
+        resources: [`arn:aws:s3:::${this.documentsBucketName}/agent-workspace/learned/active/*`],
+      })
+    )
+    knowledgeLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "KnowledgeList",
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:ListBucket", "s3:ListBucketVersions"],
+        resources: [`arn:aws:s3:::${this.documentsBucketName}`],
+        conditions: {
+          StringLike: { "s3:prefix": "agent-workspace/learned/active/*" },
+        },
+      })
+    )
+    knowledgeLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "KnowledgeVersions",
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:GetObjectVersion", "s3:ListObjectVersions"],
+        resources: [`arn:aws:s3:::${this.documentsBucketName}/agent-workspace/learned/active/*`],
+      })
+    )
+
+    if (this.documentsKeyArn) {
+      knowledgeLambda.addToRolePolicy(
+        new iam.PolicyStatement({
+          sid: "KnowledgeKMS",
+          effect: iam.Effect.ALLOW,
+          actions: ["kms:Decrypt", "kms:GenerateDataKey"],
+          resources: [this.documentsKeyArn],
+        })
+      )
+    }
+
+    // Add /knowledge routes to the shared API Gateway
+    const knowledgeResource = this.restApi.root.addResource("knowledge")
+    const lambdaIntegration = new apigateway.LambdaIntegration(knowledgeLambda)
+
+    const authorizer = new apigateway.CognitoUserPoolsAuthorizer(
+      this,
+      "KnowledgeApiAuthorizer",
+      {
+        cognitoUserPools: [this.userPool],
+        identitySource: "method.request.header.Authorization",
+        authorizerName: `${config.stack_name_base}-knowledge-authorizer`,
+      }
+    )
+    const authMethodOptions = {
+      authorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    }
+
+    // GET /knowledge — list categories
+    knowledgeResource.addMethod("GET", lambdaIntegration, authMethodOptions)
+
+    // GET /knowledge/{category} — list entries
+    const categoryResource = knowledgeResource.addResource("{category}")
+    categoryResource.addMethod("GET", lambdaIntegration, authMethodOptions)
+
+    // POST /knowledge/{category} — add entry
+    categoryResource.addMethod("POST", lambdaIntegration, authMethodOptions)
+
+    // PUT /knowledge/{category}/{index} — update entry
+    const entryResource = categoryResource.addResource("{index}")
+    entryResource.addMethod("PUT", lambdaIntegration, authMethodOptions)
+
+    // DELETE /knowledge/{category}/{index} — delete entry
+    entryResource.addMethod("DELETE", lambdaIntegration, authMethodOptions)
+
+    // POST /knowledge/{category}/undo — undo last change
+    const undoResource = categoryResource.addResource("undo")
+    undoResource.addMethod("POST", lambdaIntegration, authMethodOptions)
+  }
+
   private createAgentCoreGateway(config: AppConfig, knowledgeBaseId?: string): void {
     // Create sample tool Lambda
     const toolLambda = new lambda.Function(this, "SampleToolLambda", {
@@ -948,6 +1205,21 @@ export class BackendStack extends cdk.NestedStack {
         actions: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
         resources: [
           `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*`,
+        ],
+      })
+    )
+
+    // Policy Engine access (for Gateway to evaluate Cedar policies on tool calls)
+    // Uses broad permissions because the service requires multiple undocumented actions
+    // (GetPolicyEngine, Evaluate, CheckAuthorizePermissions, AuthorizeAction,
+    //  PartiallyAuthorizeActions, and potentially others)
+    gatewayRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["bedrock-agentcore:*"],
+        resources: [
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:policy-engine/*`,
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*`,
         ],
       })
     )
@@ -1291,6 +1563,109 @@ export class BackendStack extends cdk.NestedStack {
       value: gmailGatewayTarget.ref,
       description: "Gmail Connector Gateway Target ID",
     })
+
+    // ─── Workspace Manager tool (Step 12c) ──────────────────────────
+    // Provides read/write/list access to the agent's modular workspace in S3.
+    // Writes restricted to learned/active/ only via IAM + Lambda code.
+    if (this.documentsBucketName) {
+      const workspacePrefix = "agent-workspace/"
+
+      const workspaceLambda = new lambda.Function(this, "WorkspaceManagerLambda", {
+        runtime: lambda.Runtime.PYTHON_3_13,
+        handler: "workspace_manager_lambda.handler",
+        code: lambda.Code.fromAsset(path.join(__dirname, "../../gateway/tools/workspace_manager")),
+        timeout: cdk.Duration.seconds(15),
+        environment: {
+          WORKSPACE_BUCKET: this.documentsBucketName!,
+          WORKSPACE_PREFIX: workspacePrefix,
+        },
+        logGroup: new logs.LogGroup(this, "WorkspaceManagerLogGroup", {
+          logGroupName: `/aws/lambda/${config.stack_name_base}-workspace-manager`,
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      })
+
+      // Read access to all workspace files
+      workspaceLambda.addToRolePolicy(
+        new iam.PolicyStatement({
+          sid: "WorkspaceRead",
+          effect: iam.Effect.ALLOW,
+          actions: ["s3:GetObject"],
+          resources: [`arn:aws:s3:::${this.documentsBucketName}/${workspacePrefix}*`],
+        })
+      )
+
+      // Write access restricted to learned/active/ only
+      workspaceLambda.addToRolePolicy(
+        new iam.PolicyStatement({
+          sid: "WorkspaceWriteLearned",
+          effect: iam.Effect.ALLOW,
+          actions: ["s3:PutObject"],
+          resources: [`arn:aws:s3:::${this.documentsBucketName}/${workspacePrefix}learned/active/*`],
+        })
+      )
+
+      // List access for learned entries
+      workspaceLambda.addToRolePolicy(
+        new iam.PolicyStatement({
+          sid: "WorkspaceList",
+          effect: iam.Effect.ALLOW,
+          actions: ["s3:ListBucket"],
+          resources: [`arn:aws:s3:::${this.documentsBucketName}`],
+          conditions: {
+            StringLike: { "s3:prefix": `${workspacePrefix}learned/active/*` },
+          },
+        })
+      )
+
+      // KMS decrypt/encrypt for the documents bucket key
+      if (this.documentsKeyArn) {
+        workspaceLambda.addToRolePolicy(
+          new iam.PolicyStatement({
+            sid: "WorkspaceKMS",
+            effect: iam.Effect.ALLOW,
+            actions: ["kms:Decrypt", "kms:GenerateDataKey"],
+            resources: [this.documentsKeyArn],
+          })
+        )
+      }
+
+      // Grant Gateway role permission to invoke workspace Lambda
+      workspaceLambda.grantInvoke(gatewayRole)
+
+      // Load workspace tool spec
+      const wsToolSpecPath = path.join(__dirname, "../../gateway/tools/workspace_manager/tool_spec.json")
+      const wsToolSpec = JSON.parse(fs.readFileSync(wsToolSpecPath, "utf8"))
+
+      // Register as Gateway Target
+      const wsGatewayTarget = new bedrockagentcore.CfnGatewayTarget(this, "WorkspaceManagerTarget", {
+        gatewayIdentifier: gateway.attrGatewayIdentifier,
+        name: "workspace-manager-target",
+        description: "Workspace file read/write/list tool for agent context loading",
+        targetConfiguration: {
+          mcp: {
+            lambda: {
+              lambdaArn: workspaceLambda.functionArn,
+              toolSchema: {
+                inlinePayload: wsToolSpec,
+              },
+            },
+          },
+        },
+        credentialProviderConfigurations: [
+          {
+            credentialProviderType: "GATEWAY_IAM_ROLE",
+          },
+        ],
+      })
+      wsGatewayTarget.addDependency(gateway)
+
+      new cdk.CfnOutput(this, "WorkspaceManagerTargetId", {
+        value: wsGatewayTarget.ref,
+        description: "Workspace Manager Gateway Target ID",
+      })
+    }
 
     // Store AgentCore Gateway URL in SSM for AgentCore Runtime access
     new ssm.StringParameter(this, "GatewayUrlParam", {

@@ -152,3 +152,44 @@
 .animate-fade-in-up {
   animation: fade-in-up 2s ease-out;
 }
+
+/* Print styles for audit export */
+@media print {
+  /* Hide nav, sidebar, and non-print elements */
+  nav,
+  aside,
+  [data-sidebar],
+  header {
+    display: none !important;
+  }
+
+  /* Let content fill the page */
+  main,
+  [role="main"] {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+
+  body {
+    font-size: 11pt;
+    color: #000;
+    background: #fff;
+  }
+
+  /* Avoid breaking inside action records */
+  .print\:break-inside-avoid {
+    break-inside: avoid;
+  }
+
+  /* Show all detail blocks in print */
+  .print\:block {
+    display: block !important;
+  }
+
+  /* Page margins */
+  @page {
+    margin: 1.5cm;
+  }
+}

@@ -29,6 +29,8 @@ export interface VpcConfig {
 export interface AppConfig {
   stack_name_base: string
   admin_user_email?: string | null
+  /** ARN of the CloudWatch OAM sink in the monitoring account. If set, creates a cross-account OAM link. */
+  monitoring_sink_arn?: string | null
   backend: {
     pattern: string
     deployment_type: DeploymentType
@@ -96,6 +98,7 @@ export class ConfigManager {
       return {
         stack_name_base: stackNameBase,
         admin_user_email: parsedConfig.admin_user_email || null,
+        monitoring_sink_arn: parsedConfig.monitoring_sink_arn || null,
         backend: {
           pattern: parsedConfig.backend?.pattern || "strands-single-agent",
           deployment_type: deploymentType,

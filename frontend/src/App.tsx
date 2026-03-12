@@ -1,15 +1,21 @@
-// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
-// SPDX-License-Identifier: Apache-2.0
-
-import { BrowserRouter } from 'react-router-dom'
-import { AuthProvider } from '@/components/auth/AuthProvider'
-import AppRoutes from './routes'
+import { BrowserRouter } from "react-router-dom"
+import { AuthProvider } from "@/components/auth/AuthProvider"
+import { GlobalContextProvider } from "@/app/context/GlobalContext"
+import { ChatContextProvider } from "@/app/context/ChatContext"
+import AppLayout from "@/components/layout/AppLayout"
+import AppRoutes from "./routes"
 
 export default function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <AppRoutes />
+        <GlobalContextProvider>
+          <ChatContextProvider>
+            <AppLayout>
+              <AppRoutes />
+            </AppLayout>
+          </ChatContextProvider>
+        </GlobalContextProvider>
       </AuthProvider>
     </BrowserRouter>
   )
