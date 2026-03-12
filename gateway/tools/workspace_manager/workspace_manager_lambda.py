@@ -15,6 +15,8 @@ BUCKET_NAME = os.environ.get("WORKSPACE_BUCKET", "")
 PREFIX = os.environ.get("WORKSPACE_PREFIX", "agent-workspace/")
 LEARNED_PREFIX = f"{PREFIX}learned/active/"
 MAX_ENTRY_LENGTH = 500
+MAX_ENTRIES_PER_CATEGORY = 100
+MAX_FILE_SIZE_BYTES = 50_000  # ~50KB per category file
 
 # Reject content that looks like prompt injection
 INJECTION_PATTERNS = [
@@ -111,7 +113,15 @@ def _write_entry(category: str, content: str, entry_type: str, source: str = "we
     except s3.exceptions.NoSuchKey:
         pass  # New file
 
+    # Guard against unbounded growth
+    existing_entries = existing.count("<!-- ENTRY -->")
+    if existing_entries >= MAX_ENTRIES_PER_CATEGORY:
+        raise ValueError(f"Category '{category}' has {existing_entries} entries (max {MAX_ENTRIES_PER_CATEGORY}). Remove old entries before adding new ones.")
+
     new_content = existing + entry
+
+    if len(new_content.encode("utf-8")) > MAX_FILE_SIZE_BYTES:
+        raise ValueError(f"Category '{category}' would exceed {MAX_FILE_SIZE_BYTES // 1000}KB. Remove old entries before adding new ones.")
 
     put_kwargs = {"Bucket": BUCKET_NAME, "Key": key, "Body": new_content.encode("utf-8"), "ContentType": "text/markdown"}
     if etag:

@@ -18,6 +18,7 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger(__name__)
 
 _dynamodb_table = None
+_cloudwatch_client = None
 _SEVEN_YEARS_SECONDS = 7 * 365 * 24 * 60 * 60
 
 
@@ -89,6 +90,34 @@ def log_tool_call(
         table.put_item(Item=item)
     except ClientError as e:
         logger.error(f"[AUDIT] Failed to write audit record: {e}")
+        _emit_audit_failure_metric()
+
+
+def _emit_audit_failure_metric():
+    """Emit a CloudWatch metric when an audit write fails."""
+    global _cloudwatch_client
+    try:
+        if _cloudwatch_client is None:
+            region = os.environ.get(
+                "AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-2")
+            )
+            _cloudwatch_client = boto3.client("cloudwatch", region_name=region)
+        stack_name = os.environ.get("STACK_NAME", "unknown")
+        _cloudwatch_client.put_metric_data(
+            Namespace="AgentCore/Operations",
+            MetricData=[
+                {
+                    "MetricName": "AuditWriteFailure",
+                    "Value": 1,
+                    "Unit": "Count",
+                    "Dimensions": [
+                        {"Name": "StackName", "Value": stack_name},
+                    ],
+                }
+            ],
+        )
+    except Exception as metric_err:
+        logger.error(f"[AUDIT] Failed to emit failure metric: {metric_err}")
 
 
 def _truncate(text: str, max_length: int = 2000) -> str:
