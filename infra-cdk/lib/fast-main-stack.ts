@@ -53,14 +53,17 @@ export class FastMainStack extends cdk.Stack {
       documentsBucketArn: this.knowledgeBaseStack.documentsBucket.bucketArn,
       documentsBucketName: this.knowledgeBaseStack.documentsBucket.bucketName,
       documentsKeyArn: this.knowledgeBaseStack.documentsKey.keyArn,
+      workspaceBucketArn: this.knowledgeBaseStack.workspaceBucket.bucketArn,
+      workspaceBucketName: this.knowledgeBaseStack.workspaceBucket.bucketName,
+      workspaceKeyArn: this.knowledgeBaseStack.workspaceKey.keyArn,
     })
 
     // Step 5c/5d: Observability stack (CloudWatch dashboard + CloudTrail + Cognito backup + OAM link)
     this.observabilityStack = new ObservabilityStack(this, `${id}-observability`, {
       config: props.config,
       userPoolId: this.cognitoStack.userPoolId,
-      backupBucketName: this.knowledgeBaseStack.documentsBucket.bucketName,
-      backupBucketKeyArn: this.knowledgeBaseStack.documentsKey.keyArn,
+      backupBucketName: this.knowledgeBaseStack.opsBucket.bucketName,
+      backupBucketKeyArn: this.knowledgeBaseStack.opsKey.keyArn,
       monitoringSinkArn: props.config.monitoring_sink_arn,
     })
 

@@ -31,6 +31,9 @@ export interface BackendStackProps extends cdk.NestedStackProps {
   documentsBucketArn?: string
   documentsBucketName?: string
   documentsKeyArn?: string
+  workspaceBucketArn?: string
+  workspaceBucketName?: string
+  workspaceKeyArn?: string
 }
 
 export class BackendStack extends cdk.NestedStack {
@@ -52,6 +55,8 @@ export class BackendStack extends cdk.NestedStack {
   private restApi: apigateway.RestApi
   private documentsBucketName?: string
   private documentsKeyArn?: string
+  private workspaceBucketName?: string
+  private workspaceKeyArn?: string
 
   constructor(scope: Construct, id: string, props: BackendStackProps) {
     super(scope, id, props)
@@ -59,6 +64,8 @@ export class BackendStack extends cdk.NestedStack {
     // Store for use in private methods
     this.documentsBucketName = props.documentsBucketName
     this.documentsKeyArn = props.documentsKeyArn
+    this.workspaceBucketName = props.workspaceBucketName
+    this.workspaceKeyArn = props.workspaceKeyArn
 
     // Store the Cognito values
     this.userPoolId = props.userPoolId
@@ -128,8 +135,13 @@ export class BackendStack extends cdk.NestedStack {
     }
 
     // Create Knowledge API (Step 12c — "What I Know" page)
-    if (props.documentsBucketName) {
+    if (props.workspaceBucketName) {
       this.createKnowledgeApi(props.config, props.frontendUrl)
+    }
+
+    // Create Workspace Admin API (admin workspace override management)
+    if (props.workspaceBucketName) {
+      this.createWorkspaceAdminApi(props.config, props.frontendUrl)
     }
   }
 
@@ -336,22 +348,27 @@ export class BackendStack extends cdk.NestedStack {
     )
 
     // Add S3 read access for workspace files (system prompt assembly at runtime start)
-    if (this.documentsBucketName) {
+    if (this.workspaceBucketName) {
       agentRole.addToPolicy(
         new iam.PolicyStatement({
           sid: "WorkspacePromptRead",
           effect: iam.Effect.ALLOW,
           actions: ["s3:GetObject"],
-          resources: [`arn:aws:s3:::${this.documentsBucketName}/agent-workspace/base-persona.md`, `arn:aws:s3:::${this.documentsBucketName}/agent-workspace/map.md`],
+          resources: [
+            `arn:aws:s3:::${this.workspaceBucketName}/base-persona.md`,
+            `arn:aws:s3:::${this.workspaceBucketName}/map.md`,
+            `arn:aws:s3:::${this.workspaceBucketName}/overrides/base-persona.md`,
+            `arn:aws:s3:::${this.workspaceBucketName}/overrides/map.md`,
+          ],
         })
       )
-      if (this.documentsKeyArn) {
+      if (this.workspaceKeyArn) {
         agentRole.addToPolicy(
           new iam.PolicyStatement({
             sid: "WorkspacePromptKMS",
             effect: iam.Effect.ALLOW,
             actions: ["kms:Decrypt"],
-            resources: [this.documentsKeyArn],
+            resources: [this.workspaceKeyArn],
           })
         )
       }
@@ -408,7 +425,6 @@ export class BackendStack extends cdk.NestedStack {
     )
 
     // Environment variables for the runtime
-    const workspaceBucketName = this.documentsBucketName || ""
     const envVars: { [key: string]: string } = {
       AWS_REGION: stack.region,
       AWS_DEFAULT_REGION: stack.region,
@@ -416,8 +432,8 @@ export class BackendStack extends cdk.NestedStack {
       STACK_NAME: config.stack_name_base,
       GATEWAY_CREDENTIAL_PROVIDER_NAME: `${config.stack_name_base}-runtime-gateway-auth`, // Used by @requires_access_token decorator to look up the correct provider
       AUDIT_TABLE_NAME: `${config.stack_name_base}-audit`, // Step 5b: DynamoDB audit table for tool call logging
-      WORKSPACE_BUCKET: workspaceBucketName, // Step 12c: workspace files live in documents bucket
-      WORKSPACE_PREFIX: "agent-workspace/", // Step 12c: S3 prefix for workspace files
+      WORKSPACE_BUCKET: this.workspaceBucketName || "", // Step 12c: workspace files in dedicated workspace bucket
+      WORKSPACE_PREFIX: "", // Workspace files at bucket root (no prefix needed — dedicated bucket)
     }
 
     // Create the runtime using L2 construct
@@ -681,7 +697,7 @@ export class BackendStack extends cdk.NestedStack {
       description: "API for user feedback and future endpoints",
       defaultCorsPreflightOptions: {
         allowOrigins: [frontendUrl, "http://localhost:3000"],
-        allowMethods: ["POST", "OPTIONS"],
+        allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allowHeaders: ["Content-Type", "Authorization"],
       },
       deployOptions: {
@@ -711,6 +727,41 @@ export class BackendStack extends cdk.NestedStack {
           },
           // Disable caching for health endpoint
           "/health/GET": {
+            cachingEnabled: false,
+          },
+          // Disable caching for workspace admin endpoints (content changes on writes)
+          "/workspace/GET": {
+            cachingEnabled: false,
+          },
+          "/workspace/file/GET": {
+            cachingEnabled: false,
+          },
+          "/workspace/file/PUT": {
+            cachingEnabled: false,
+          },
+          "/workspace/file/DELETE": {
+            cachingEnabled: false,
+          },
+          "/workspace/learned/GET": {
+            cachingEnabled: false,
+          },
+          "/workspace/learned/PUT": {
+            cachingEnabled: false,
+          },
+          "/workspace/learned/DELETE": {
+            cachingEnabled: false,
+          },
+          // Disable caching for knowledge endpoints (content changes on writes)
+          "/knowledge/GET": {
+            cachingEnabled: false,
+          },
+          "/knowledge/{category}/GET": {
+            cachingEnabled: false,
+          },
+          "/knowledge/{category}/POST": {
+            cachingEnabled: false,
+          },
+          "/knowledge/{category}/{index}/GET": {
             cachingEnabled: false,
           },
         },
@@ -1033,9 +1084,9 @@ export class BackendStack extends cdk.NestedStack {
       entry: path.join(__dirname, "..", "lambdas", "knowledge"),
       handler: "handler",
       environment: {
-        BUCKET_NAME: this.documentsBucketName!,
-        KMS_KEY_ARN: this.documentsKeyArn || "",
-        WORKSPACE_PREFIX: "agent-workspace/",
+        BUCKET_NAME: this.workspaceBucketName!,
+        KMS_KEY_ARN: this.workspaceKeyArn || "",
+        WORKSPACE_PREFIX: "",
         CORS_ALLOWED_ORIGINS: `${frontendUrl},http://localhost:3000`,
       },
       timeout: cdk.Duration.seconds(15),
@@ -1055,13 +1106,16 @@ export class BackendStack extends cdk.NestedStack {
       }),
     })
 
-    // S3: read all workspace files, write only to learned/active/
+    // S3: read learned/active/ entries + learned/config.json, write only to learned/active/
     knowledgeLambda.addToRolePolicy(
       new iam.PolicyStatement({
         sid: "KnowledgeRead",
         effect: iam.Effect.ALLOW,
         actions: ["s3:GetObject"],
-        resources: [`arn:aws:s3:::${this.documentsBucketName}/agent-workspace/learned/active/*`],
+        resources: [
+          `arn:aws:s3:::${this.workspaceBucketName}/learned/active/*`,
+          `arn:aws:s3:::${this.workspaceBucketName}/learned/config.json`,
+        ],
       })
     )
     knowledgeLambda.addToRolePolicy(
@@ -1069,7 +1123,7 @@ export class BackendStack extends cdk.NestedStack {
         sid: "KnowledgeWrite",
         effect: iam.Effect.ALLOW,
         actions: ["s3:PutObject"],
-        resources: [`arn:aws:s3:::${this.documentsBucketName}/agent-workspace/learned/active/*`],
+        resources: [`arn:aws:s3:::${this.workspaceBucketName}/learned/active/*`],
       })
     )
     knowledgeLambda.addToRolePolicy(
@@ -1077,9 +1131,9 @@ export class BackendStack extends cdk.NestedStack {
         sid: "KnowledgeList",
         effect: iam.Effect.ALLOW,
         actions: ["s3:ListBucket", "s3:ListBucketVersions"],
-        resources: [`arn:aws:s3:::${this.documentsBucketName}`],
+        resources: [`arn:aws:s3:::${this.workspaceBucketName}`],
         conditions: {
-          StringLike: { "s3:prefix": "agent-workspace/learned/active/*" },
+          StringLike: { "s3:prefix": "learned/active/*" },
         },
       })
     )
@@ -1088,17 +1142,17 @@ export class BackendStack extends cdk.NestedStack {
         sid: "KnowledgeVersions",
         effect: iam.Effect.ALLOW,
         actions: ["s3:GetObjectVersion", "s3:ListObjectVersions"],
-        resources: [`arn:aws:s3:::${this.documentsBucketName}/agent-workspace/learned/active/*`],
+        resources: [`arn:aws:s3:::${this.workspaceBucketName}/learned/active/*`],
       })
     )
 
-    if (this.documentsKeyArn) {
+    if (this.workspaceKeyArn) {
       knowledgeLambda.addToRolePolicy(
         new iam.PolicyStatement({
           sid: "KnowledgeKMS",
           effect: iam.Effect.ALLOW,
           actions: ["kms:Decrypt", "kms:GenerateDataKey"],
-          resources: [this.documentsKeyArn],
+          resources: [this.workspaceKeyArn],
         })
       )
     }
@@ -1141,6 +1195,112 @@ export class BackendStack extends cdk.NestedStack {
     // POST /knowledge/{category}/undo — undo last change
     const undoResource = categoryResource.addResource("undo")
     undoResource.addMethod("POST", lambdaIntegration, authMethodOptions)
+  }
+
+  /**
+   * Workspace Admin API — full workspace visibility and override management.
+   */
+  private createWorkspaceAdminApi(config: AppConfig, frontendUrl: string): void {
+    const workspaceAdminLambda = new PythonFunction(this, "WorkspaceAdminLambda", {
+      functionName: `${config.stack_name_base}-workspace-admin`,
+      runtime: lambda.Runtime.PYTHON_3_13,
+      architecture: lambda.Architecture.ARM_64,
+      entry: path.join(__dirname, "..", "lambdas", "workspace-admin"),
+      handler: "handler",
+      environment: {
+        BUCKET_NAME: this.workspaceBucketName!,
+        KMS_KEY_ARN: this.workspaceKeyArn || "",
+        CORS_ALLOWED_ORIGINS: `${frontendUrl},http://localhost:3000`,
+      },
+      timeout: cdk.Duration.seconds(15),
+      layers: [
+        lambda.LayerVersion.fromLayerVersionArn(
+          this,
+          "WorkspaceAdminPowertoolsLayer",
+          `arn:aws:lambda:${
+            cdk.Stack.of(this).region
+          }:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-arm64:18`
+        ),
+      ],
+      logGroup: new logs.LogGroup(this, "WorkspaceAdminLambdaLogGroup", {
+        logGroupName: `/aws/lambda/${config.stack_name_base}-workspace-admin`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
+
+    // S3: full read/write/delete on workspace bucket (admin has full access)
+    workspaceAdminLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "WorkspaceAdminRead",
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:GetObject"],
+        resources: [`arn:aws:s3:::${this.workspaceBucketName}/*`],
+      })
+    )
+    workspaceAdminLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "WorkspaceAdminWrite",
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:PutObject", "s3:DeleteObject"],
+        resources: [
+          `arn:aws:s3:::${this.workspaceBucketName}/overrides/*`,
+          `arn:aws:s3:::${this.workspaceBucketName}/learned/active/*`,
+        ],
+      })
+    )
+    workspaceAdminLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "WorkspaceAdminList",
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:ListBucket"],
+        resources: [`arn:aws:s3:::${this.workspaceBucketName}`],
+      })
+    )
+
+    if (this.workspaceKeyArn) {
+      workspaceAdminLambda.addToRolePolicy(
+        new iam.PolicyStatement({
+          sid: "WorkspaceAdminKMS",
+          effect: iam.Effect.ALLOW,
+          actions: ["kms:Decrypt", "kms:GenerateDataKey"],
+          resources: [this.workspaceKeyArn],
+        })
+      )
+    }
+
+    // Add /workspace routes to the shared API Gateway
+    const workspaceResource = this.restApi.root.addResource("workspace")
+    const wsLambdaIntegration = new apigateway.LambdaIntegration(workspaceAdminLambda)
+
+    const wsAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(
+      this,
+      "WorkspaceAdminApiAuthorizer",
+      {
+        cognitoUserPools: [this.userPool],
+        identitySource: "method.request.header.Authorization",
+        authorizerName: `${config.stack_name_base}-ws-admin-authorizer`,
+      }
+    )
+    const wsAuthMethodOptions = {
+      authorizer: wsAuthorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    }
+
+    // GET /workspace — list files
+    workspaceResource.addMethod("GET", wsLambdaIntegration, wsAuthMethodOptions)
+
+    // /workspace/file — GET (read), PUT (save override), DELETE (reset to core)
+    const fileResource = workspaceResource.addResource("file")
+    fileResource.addMethod("GET", wsLambdaIntegration, wsAuthMethodOptions)
+    fileResource.addMethod("PUT", wsLambdaIntegration, wsAuthMethodOptions)
+    fileResource.addMethod("DELETE", wsLambdaIntegration, wsAuthMethodOptions)
+
+    // /workspace/learned — GET (list), PUT (edit), DELETE (delete)
+    const learnedResource = workspaceResource.addResource("learned")
+    learnedResource.addMethod("GET", wsLambdaIntegration, wsAuthMethodOptions)
+    learnedResource.addMethod("PUT", wsLambdaIntegration, wsAuthMethodOptions)
+    learnedResource.addMethod("DELETE", wsLambdaIntegration, wsAuthMethodOptions)
   }
 
   private createAgentCoreGateway(config: AppConfig, knowledgeBaseId?: string): void {
@@ -1567,17 +1727,15 @@ export class BackendStack extends cdk.NestedStack {
     // ─── Workspace Manager tool (Step 12c) ──────────────────────────
     // Provides read/write/list access to the agent's modular workspace in S3.
     // Writes restricted to learned/active/ only via IAM + Lambda code.
-    if (this.documentsBucketName) {
-      const workspacePrefix = "agent-workspace/"
-
+    if (this.workspaceBucketName) {
       const workspaceLambda = new lambda.Function(this, "WorkspaceManagerLambda", {
         runtime: lambda.Runtime.PYTHON_3_13,
         handler: "workspace_manager_lambda.handler",
         code: lambda.Code.fromAsset(path.join(__dirname, "../../gateway/tools/workspace_manager")),
         timeout: cdk.Duration.seconds(15),
         environment: {
-          WORKSPACE_BUCKET: this.documentsBucketName!,
-          WORKSPACE_PREFIX: workspacePrefix,
+          WORKSPACE_BUCKET: this.workspaceBucketName!,
+          WORKSPACE_PREFIX: "",
         },
         logGroup: new logs.LogGroup(this, "WorkspaceManagerLogGroup", {
           logGroupName: `/aws/lambda/${config.stack_name_base}-workspace-manager`,
@@ -1592,7 +1750,7 @@ export class BackendStack extends cdk.NestedStack {
           sid: "WorkspaceRead",
           effect: iam.Effect.ALLOW,
           actions: ["s3:GetObject"],
-          resources: [`arn:aws:s3:::${this.documentsBucketName}/${workspacePrefix}*`],
+          resources: [`arn:aws:s3:::${this.workspaceBucketName}/*`],
         })
       )
 
@@ -1602,7 +1760,7 @@ export class BackendStack extends cdk.NestedStack {
           sid: "WorkspaceWriteLearned",
           effect: iam.Effect.ALLOW,
           actions: ["s3:PutObject"],
-          resources: [`arn:aws:s3:::${this.documentsBucketName}/${workspacePrefix}learned/active/*`],
+          resources: [`arn:aws:s3:::${this.workspaceBucketName}/learned/active/*`],
         })
       )
 
@@ -1612,21 +1770,21 @@ export class BackendStack extends cdk.NestedStack {
           sid: "WorkspaceList",
           effect: iam.Effect.ALLOW,
           actions: ["s3:ListBucket"],
-          resources: [`arn:aws:s3:::${this.documentsBucketName}`],
+          resources: [`arn:aws:s3:::${this.workspaceBucketName}`],
           conditions: {
-            StringLike: { "s3:prefix": `${workspacePrefix}learned/active/*` },
+            StringLike: { "s3:prefix": "learned/active/*" },
           },
         })
       )
 
-      // KMS decrypt/encrypt for the documents bucket key
-      if (this.documentsKeyArn) {
+      // KMS decrypt/encrypt for the workspace bucket key
+      if (this.workspaceKeyArn) {
         workspaceLambda.addToRolePolicy(
           new iam.PolicyStatement({
             sid: "WorkspaceKMS",
             effect: iam.Effect.ALLOW,
             actions: ["kms:Decrypt", "kms:GenerateDataKey"],
-            resources: [this.documentsKeyArn],
+            resources: [this.workspaceKeyArn],
           })
         )
       }

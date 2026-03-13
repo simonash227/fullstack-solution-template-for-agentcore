@@ -17,6 +17,10 @@ export interface KnowledgeBaseStackProps extends cdk.NestedStackProps {
 export class KnowledgeBaseStack extends cdk.NestedStack {
   public readonly documentsBucket: s3.Bucket
   public readonly documentsKey: kms.Key
+  public readonly workspaceBucket: s3.Bucket
+  public readonly workspaceKey: kms.Key
+  public readonly opsBucket: s3.Bucket
+  public readonly opsKey: kms.Key
   public readonly knowledgeBaseId: string
   public readonly knowledgeBaseArn: string
   public readonly dataSourceId: string
@@ -71,6 +75,54 @@ export class KnowledgeBaseStack extends cdk.NestedStack {
     // Note: DenyUnencryptedUploads policy removed — bucket default encryption (KMS)
     // handles this automatically. The explicit deny blocked presigned URL uploads
     // because browsers can't send x-amz-server-side-encryption headers.
+
+    // ─── Workspace Bucket (agent workspace files — separate from client documents) ───
+
+    this.workspaceKey = new kms.Key(this, "WorkspaceKey", {
+      alias: `${config.stack_name_base}-workspace`,
+      description: `KMS key for ${config.stack_name_base} workspace bucket`,
+      enableKeyRotation: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    })
+
+    this.workspaceBucket = new s3.Bucket(this, "WorkspaceBucket", {
+      bucketName: `${bucketPrefix}-workspace-${this.account}`,
+      encryptionKey: this.workspaceKey,
+      encryption: s3.BucketEncryption.KMS,
+      versioned: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    })
+
+    // ─── Ops Bucket (Cognito backups, operational exports) ──────────
+
+    this.opsKey = new kms.Key(this, "OpsKey", {
+      alias: `${config.stack_name_base}-ops`,
+      description: `KMS key for ${config.stack_name_base} ops bucket`,
+      enableKeyRotation: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    })
+
+    this.opsBucket = new s3.Bucket(this, "OpsBucket", {
+      bucketName: `${bucketPrefix}-ops-${this.account}`,
+      encryptionKey: this.opsKey,
+      encryption: s3.BucketEncryption.KMS,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      lifecycleRules: [
+        {
+          transitions: [
+            {
+              storageClass: s3.StorageClass.GLACIER,
+              transitionAfter: cdk.Duration.days(90),
+            },
+          ],
+          expiration: cdk.Duration.days(2555),
+        },
+      ],
+    })
 
     // ─── Step 3b: S3 Vectors + Knowledge Base ────────────────────────
 
@@ -284,6 +336,28 @@ export class KnowledgeBaseStack extends cdk.NestedStack {
     new cdk.CfnOutput(this, "VectorBucketArn", {
       value: vectorBucketArn,
       description: "S3 Vectors bucket ARN",
+    })
+
+    new cdk.CfnOutput(this, "WorkspaceBucketName", {
+      value: this.workspaceBucket.bucketName,
+      description: "S3 workspace bucket name",
+      exportName: `${config.stack_name_base}-WorkspaceBucket`,
+    })
+
+    new cdk.CfnOutput(this, "WorkspaceKeyArn", {
+      value: this.workspaceKey.keyArn,
+      description: "KMS key ARN for workspace encryption",
+    })
+
+    new cdk.CfnOutput(this, "OpsBucketName", {
+      value: this.opsBucket.bucketName,
+      description: "S3 ops bucket name",
+      exportName: `${config.stack_name_base}-OpsBucket`,
+    })
+
+    new cdk.CfnOutput(this, "OpsKeyArn", {
+      value: this.opsKey.keyArn,
+      description: "KMS key ARN for ops encryption",
     })
 
     // ─── Step 3c: CloudWatch alarm on KB ingestion failures ───────────

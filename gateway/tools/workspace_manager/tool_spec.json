@@ -1,14 +1,14 @@
 [
   {
     "name": "workspace_manager",
-    "description": "Read workspace files (rooms, skills, client context, learned knowledge), write client knowledge, or list learned entries. Use this tool to load task-specific instructions before responding.",
+    "description": "Read workspace files (rooms, skills, client context) or list learned knowledge entries. Use this tool to load task-specific instructions before responding.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "action": {
           "type": "string",
-          "enum": ["read", "write", "list"],
-          "description": "Action to perform: read a workspace file, write to learned knowledge, or list learned entries"
+          "enum": ["read", "list"],
+          "description": "Action to perform: read a workspace file, or list learned knowledge entries"
         },
         "path": {
           "type": "string",
@@ -16,17 +16,7 @@
         },
         "category": {
           "type": "string",
-          "enum": ["policies", "people-updates", "key-dates", "preferences"],
-          "description": "Knowledge category for write/list actions"
-        },
-        "content": {
-          "type": "string",
-          "description": "The knowledge to store (for write action, max 500 characters)"
-        },
-        "entry_type": {
-          "type": "string",
-          "enum": ["policy", "fact", "temporary", "preference"],
-          "description": "Type of knowledge entry (for write action)"
+          "description": "Knowledge category to list entries for (for list action). Omit to list all categories."
         }
       },
       "required": ["action"]

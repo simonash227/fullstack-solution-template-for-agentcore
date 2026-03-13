@@ -23,14 +23,6 @@ import {
   type KnowledgeEntry,
 } from "@/services/knowledgeService"
 import { ErrorBanner } from "@/components/shared/ErrorBanner"
-import { EmptyState } from "@/components/shared/EmptyState"
-
-const CATEGORY_LABELS: Record<string, string> = {
-  policies: "Policies",
-  "people-updates": "People & Team",
-  "key-dates": "Key Dates",
-  preferences: "Preferences",
-}
 
 const ENTRY_TYPES = ["fact", "policy", "temporary", "preference"]
 
@@ -170,8 +162,8 @@ function KnowledgeContent() {
       <div className="p-6 border-b">
         <h1 className="text-2xl font-semibold">What I Know</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Knowledge the agent has been asked to remember. You can view, edit, or
-          remove entries.
+          Tell your agent what it needs to know about you, your company, and
+          your clients. Add, edit, or remove entries below.
         </p>
       </div>
 
@@ -184,15 +176,8 @@ function KnowledgeContent() {
           <div className="text-center text-muted-foreground py-12">
             Loading...
           </div>
-        ) : categories.length === 0 ||
-          categories.every((c) => c.count === 0) ? (
-          <EmptyState
-            icon={BookOpen}
-            title="No knowledge yet"
-            description='The agent will store knowledge here when you say things like "Remember that..." in chat.'
-          />
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-3">
             {categories.map((cat) => (
               <div
                 key={cat.category}
@@ -200,32 +185,44 @@ function KnowledgeContent() {
               >
                 {/* Category header */}
                 <button
-                  className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors"
+                  className="w-full flex items-start justify-between p-4 hover:bg-muted/50 transition-colors text-left"
                   onClick={() => toggleCategory(cat.category)}
                 >
-                  <div className="flex items-center gap-2">
-                    {expandedCat === cat.category ? (
-                      <ChevronDown className="h-4 w-4" />
-                    ) : (
-                      <ChevronRight className="h-4 w-4" />
-                    )}
-                    <span className="font-medium">
-                      {CATEGORY_LABELS[cat.category] || cat.category}
-                    </span>
-                    <span className="text-sm text-muted-foreground">
-                      ({cat.count})
-                    </span>
+                  <div className="flex items-start gap-3">
+                    <div className="mt-0.5">
+                      {expandedCat === cat.category ? (
+                        <ChevronDown className="h-4 w-4" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4" />
+                      )}
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{cat.label}</span>
+                        <span className="text-sm text-muted-foreground">
+                          ({cat.count})
+                        </span>
+                      </div>
+                      <p className="text-sm text-muted-foreground mt-0.5">
+                        {cat.description}
+                      </p>
+                    </div>
                   </div>
                   {expandedCat === cat.category && (
-                    <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleUndo(cat.category)}
-                        title="Undo last change"
-                      >
-                        <Undo2 className="h-4 w-4" />
-                      </Button>
+                    <div
+                      className="flex gap-1 shrink-0"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {cat.count > 0 && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleUndo(cat.category)}
+                          title="Undo last change"
+                        >
+                          <Undo2 className="h-4 w-4" />
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="sm"
@@ -249,8 +246,23 @@ function KnowledgeContent() {
                         Loading...
                       </div>
                     ) : entries.length === 0 ? (
-                      <div className="p-4 text-sm text-muted-foreground">
-                        No entries yet
+                      <div className="p-4 text-center">
+                        <BookOpen className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
+                        <p className="text-sm text-muted-foreground">
+                          Nothing here yet
+                        </p>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="mt-2"
+                          onClick={() => {
+                            setAddingTo(cat.category)
+                            setShowAddForm(true)
+                          }}
+                        >
+                          <Plus className="h-4 w-4 mr-1" />
+                          Add first entry
+                        </Button>
                       </div>
                     ) : (
                       <div className="divide-y">
@@ -291,11 +303,9 @@ function KnowledgeContent() {
                               <>
                                 <div className="flex-1">
                                   <p className="text-sm">{entry.content}</p>
-                                  <div className="flex gap-3 mt-1 text-xs text-muted-foreground">
-                                    <span>Noted: {entry.noted}</span>
-                                    <span>Type: {entry.type}</span>
-                                    <span>Source: {entry.source}</span>
-                                  </div>
+                                  <p className="text-xs text-muted-foreground mt-1">
+                                    Added {entry.noted}
+                                  </p>
                                 </div>
                                 <div className="flex gap-1 shrink-0">
                                   <Button
@@ -334,7 +344,7 @@ function KnowledgeContent() {
                         <textarea
                           value={newContent}
                           onChange={(e) => setNewContent(e.target.value)}
-                          placeholder="What should the agent remember?"
+                          placeholder={`What should your agent know about ${cat.label.toLowerCase()}?`}
                           className="w-full border rounded p-2 text-sm min-h-[60px]"
                           maxLength={500}
                         />

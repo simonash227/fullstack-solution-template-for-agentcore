@@ -342,6 +342,7 @@ def generate_aws_exports(
     region: str,
     pattern: str,
     frontend_dir: Path,
+    admin_enabled: bool = False,
 ) -> None:
     """
     Generate aws-exports.json configuration file.
@@ -379,6 +380,9 @@ def generate_aws_exports(
         "documentsApiUrl": outputs.get("DocumentsApiUrl", ""),
         "agentPattern": pattern,
     }
+
+    if admin_enabled:
+        aws_exports["adminEnabled"] = True
 
     public_dir = frontend_dir / "public"
     public_dir.mkdir(parents=True, exist_ok=True)
@@ -488,10 +492,13 @@ def main() -> int:
     pattern = config.get("pattern", "strands-single-agent")
     log_info(f"Agent pattern: {pattern}")
 
+    # Check for --admin flag
+    admin_enabled = "--admin" in sys.argv
+
     # Generate aws-exports.json
     log_info("Generating aws-exports.json...")
     try:
-        generate_aws_exports(stack_name, outputs, region, pattern, frontend_dir)
+        generate_aws_exports(stack_name, outputs, region, pattern, frontend_dir, admin_enabled=admin_enabled)
     except ValueError as e:
         log_error(str(e))
         return 1

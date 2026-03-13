@@ -19,6 +19,8 @@ async function loadApiUrl(): Promise<string> {
 
 export interface KnowledgeCategory {
   category: string
+  label: string
+  description: string
   count: number
 }
 

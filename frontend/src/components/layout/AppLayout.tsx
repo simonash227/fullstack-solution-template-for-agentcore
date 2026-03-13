@@ -35,7 +35,6 @@ type NavItem = {
   label: string
   icon: LucideIcon
   path: string
-  disabled?: boolean
 }
 
 const navItems: NavItem[] = [
@@ -43,7 +42,7 @@ const navItems: NavItem[] = [
   { label: "Documents", icon: FileText, path: "/documents" },
   { label: "What I Know", icon: BookOpen, path: "/knowledge" },
   { label: "History", icon: Clock, path: "/history" },
-  { label: "Admin", icon: Settings, path: "/admin", disabled: true },
+  { label: "Admin", icon: Settings, path: "/admin" },
 ]
 
 type Branding = {
@@ -58,12 +57,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const location = useLocation()
   const navigate = useNavigate()
   const [branding, setBranding] = useState<Branding>({})
+  const [adminEnabled, setAdminEnabled] = useState(false)
 
   useEffect(() => {
     fetch("/aws-exports.json")
       .then((r) => r.json())
       .then((config) => {
         if (config.branding) setBranding(config.branding)
+        if (config.adminEnabled) setAdminEnabled(true)
       })
       .catch(() => {})
   }, [])
@@ -97,14 +98,14 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           <SidebarGroup>
             <SidebarGroupContent>
               <SidebarMenu>
-                {navItems.map((item) => (
+                {navItems
+                  .filter((item) => item.path !== "/admin" || adminEnabled)
+                  .map((item) => (
                   <SidebarMenuItem key={item.path}>
                     <SidebarMenuButton
                       isActive={location.pathname === item.path}
-                      onClick={() => !item.disabled && navigate(item.path)}
+                      onClick={() => navigate(item.path)}
                       tooltip={item.label}
-                      disabled={item.disabled}
-                      className={item.disabled ? "opacity-40 cursor-not-allowed" : ""}
                     >
                       <item.icon />
                       <span>{item.label}</span>

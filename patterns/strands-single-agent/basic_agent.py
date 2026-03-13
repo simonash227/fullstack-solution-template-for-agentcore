@@ -3,6 +3,8 @@ import os
 import time
 import traceback
 
+from botocore.exceptions import ClientError
+
 import boto3
 from bedrock_agentcore.identity.auth import requires_access_token
 from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig, RetrievalConfig
@@ -29,14 +31,14 @@ _prompt_cache: dict = {"text": None, "loaded_at": 0.0}
 PROMPT_CACHE_TTL_SECONDS = 300  # 5 minutes
 
 WORKSPACE_BUCKET = os.environ.get("WORKSPACE_BUCKET", "")
-WORKSPACE_PREFIX = os.environ.get("WORKSPACE_PREFIX", "agent-workspace/")
+WORKSPACE_PREFIX = os.environ.get("WORKSPACE_PREFIX", "")
 
 
 def get_system_prompt() -> str:
     """
     Assemble the system prompt from workspace files in S3 with a 5-minute TTL cache.
 
-    Reads base-persona.md and map.md from the agent-workspace/ prefix, concatenates
+    Reads base-persona.md and map.md from the workspace bucket, concatenates
     them, and caches the result. Placeholder tokens ({{AGENT_NAME}}, {{FIRM_NAME}}, etc.)
     are rendered at deploy time by assemble-workspace.py — not at runtime.
 
@@ -53,10 +55,18 @@ def get_system_prompt() -> str:
     s3 = boto3.client("s3", region_name=os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-2"))
     parts = []
     for key in ["base-persona.md", "map.md"]:
+        override_key = f"{WORKSPACE_PREFIX}overrides/{key}"
         full_key = f"{WORKSPACE_PREFIX}{key}"
-        print(f"[PROMPT] Loading s3://{WORKSPACE_BUCKET}/{full_key}")
-        response = s3.get_object(Bucket=WORKSPACE_BUCKET, Key=full_key)
-        parts.append(response["Body"].read().decode("utf-8"))
+        # Check override first, fall back to core
+        try:
+            print(f"[PROMPT] Checking override s3://{WORKSPACE_BUCKET}/{override_key}")
+            response = s3.get_object(Bucket=WORKSPACE_BUCKET, Key=override_key)
+            parts.append(response["Body"].read().decode("utf-8"))
+            print(f"[PROMPT] Using override version for {key}")
+        except (s3.exceptions.NoSuchKey, ClientError):
+            print(f"[PROMPT] No override, loading core s3://{WORKSPACE_BUCKET}/{full_key}")
+            response = s3.get_object(Bucket=WORKSPACE_BUCKET, Key=full_key)
+            parts.append(response["Body"].read().decode("utf-8"))
 
     text = "\n\n".join(parts)
 

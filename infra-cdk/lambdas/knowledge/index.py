@@ -1,5 +1,6 @@
 """Knowledge API Lambda Handler — CRUD for learned knowledge entries (What I Know page)."""
 
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -13,8 +14,9 @@ from aws_lambda_powertools.utilities.typing import LambdaContext
 BUCKET_NAME = os.environ["BUCKET_NAME"]
 KMS_KEY_ARN = os.environ.get("KMS_KEY_ARN", "")
 CORS_ALLOWED_ORIGINS = os.environ.get("CORS_ALLOWED_ORIGINS", "*")
-WORKSPACE_PREFIX = os.environ.get("WORKSPACE_PREFIX", "agent-workspace/")
+WORKSPACE_PREFIX = os.environ.get("WORKSPACE_PREFIX", "")
 LEARNED_PREFIX = f"{WORKSPACE_PREFIX}learned/active/"
+CONFIG_KEY = f"{WORKSPACE_PREFIX}learned/config.json"
 
 cors_origins = [
     origin.strip() for origin in CORS_ALLOWED_ORIGINS.split(",") if origin.strip()
@@ -33,8 +35,18 @@ s3 = boto3.client("s3")
 logger = Logger()
 app = APIGatewayRestResolver(cors=cors_config)
 
-VALID_CATEGORIES = {"policies", "people-updates", "key-dates", "preferences"}
 MAX_ENTRY_LENGTH = 500
+
+DEFAULT_CATEGORIES = [
+    {"id": "personal", "label": "About Me", "description": "Your preferences, work style, schedule"},
+    {"id": "company", "label": "My Company", "description": "Policies, key dates, company info"},
+    {"id": "team", "label": "My Team", "description": "People, roles, responsibilities"},
+    {"id": "clients", "label": "My Clients", "description": "Client details, matters, relationships"},
+]
+
+# Cache for config loaded from S3
+_config_cache = {"categories": None, "loaded_at": 0}
+CONFIG_CACHE_TTL = 300  # 5 minutes
 
 INJECTION_PATTERNS = [
     r"(?i)ignore\s+(previous|above|all)\s+instructions",
@@ -42,6 +54,31 @@ INJECTION_PATTERNS = [
     r"(?i)system\s*:\s*",
     r"(?i)<\s*/?system",
 ]
+
+
+def _load_categories() -> list[dict]:
+    """Load knowledge categories from S3 config. Falls back to defaults."""
+    import time
+    now = time.time()
+    if _config_cache["categories"] is not None and (now - _config_cache["loaded_at"]) < CONFIG_CACHE_TTL:
+        return _config_cache["categories"]
+
+    try:
+        resp = s3.get_object(Bucket=BUCKET_NAME, Key=CONFIG_KEY)
+        config = json.loads(resp["Body"].read().decode("utf-8"))
+        categories = config.get("categories", DEFAULT_CATEGORIES)
+    except Exception:
+        logger.info("No learned/config.json found, using defaults")
+        categories = DEFAULT_CATEGORIES
+
+    _config_cache["categories"] = categories
+    _config_cache["loaded_at"] = now
+    return categories
+
+
+def _get_valid_category_ids() -> set[str]:
+    """Get the set of valid category IDs from config."""
+    return {cat["id"] for cat in _load_categories()}
 
 
 def _parse_entries(content: str) -> list[dict]:
@@ -94,31 +131,54 @@ def _sanitise_content(content: str) -> str:
 
 @app.get("/knowledge")
 def list_categories():
-    """List all categories with entry counts."""
+    """List all categories with entry counts and metadata from config."""
+    categories = _load_categories()
+    cat_lookup = {cat["id"]: cat for cat in categories}
+
     results = []
+    # Scan S3 for existing category files
+    found_ids = set()
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=BUCKET_NAME, Prefix=LEARNED_PREFIX):
         for obj in page.get("Contents", []):
-            cat = obj["Key"].replace(LEARNED_PREFIX, "").replace(".md", "")
-            if cat in VALID_CATEGORIES:
+            cat_id = obj["Key"].replace(LEARNED_PREFIX, "").replace(".md", "")
+            if cat_id in cat_lookup:
+                found_ids.add(cat_id)
                 try:
                     resp = s3.get_object(Bucket=BUCKET_NAME, Key=obj["Key"])
                     text = resp["Body"].read().decode("utf-8")
                     entries = _parse_entries(text)
-                    results.append({"category": cat, "count": len(entries)})
+                    count = len(entries)
                 except Exception:
-                    results.append({"category": cat, "count": 0})
-    # Include empty categories
-    found = {r["category"] for r in results}
-    for cat in VALID_CATEGORIES - found:
-        results.append({"category": cat, "count": 0})
-    return {"categories": sorted(results, key=lambda x: x["category"])}
+                    count = 0
+                cat_meta = cat_lookup[cat_id]
+                results.append({
+                    "category": cat_id,
+                    "label": cat_meta.get("label", cat_id),
+                    "description": cat_meta.get("description", ""),
+                    "count": count,
+                })
+
+    # Include configured categories that have no entries yet
+    for cat in categories:
+        if cat["id"] not in found_ids:
+            results.append({
+                "category": cat["id"],
+                "label": cat.get("label", cat["id"]),
+                "description": cat.get("description", ""),
+                "count": 0,
+            })
+
+    # Sort by config order
+    order = {cat["id"]: i for i, cat in enumerate(categories)}
+    results.sort(key=lambda x: order.get(x["category"], 999))
+    return {"categories": results}
 
 
 @app.get("/knowledge/<category>")
 def list_entries(category: str):
     """List entries in a category."""
-    if category not in VALID_CATEGORIES:
+    if category not in _get_valid_category_ids():
         return {"error": f"Invalid category: {category}"}, 400
     key = f"{LEARNED_PREFIX}{category}.md"
     try:
@@ -137,7 +197,7 @@ def list_entries(category: str):
 @app.post("/knowledge/<category>")
 def add_entry(category: str):
     """Add an entry to a category."""
-    if category not in VALID_CATEGORIES:
+    if category not in _get_valid_category_ids():
         return {"error": f"Invalid category: {category}"}, 400
     body = app.current_event.json_body or {}
     content = _sanitise_content(body.get("content", ""))
@@ -181,7 +241,7 @@ def add_entry(category: str):
 @app.put("/knowledge/<category>/<index>")
 def update_entry(category: str, index: str):
     """Update an entry by index."""
-    if category not in VALID_CATEGORIES:
+    if category not in _get_valid_category_ids():
         return {"error": f"Invalid category: {category}"}, 400
     idx = int(index)
     body = app.current_event.json_body or {}
@@ -210,7 +270,7 @@ def update_entry(category: str, index: str):
 @app.delete("/knowledge/<category>/<index>")
 def delete_entry(category: str, index: str):
     """Delete an entry by index."""
-    if category not in VALID_CATEGORIES:
+    if category not in _get_valid_category_ids():
         return {"error": f"Invalid category: {category}"}, 400
     idx = int(index)
 
@@ -237,7 +297,7 @@ def delete_entry(category: str, index: str):
 @app.post("/knowledge/<category>/undo")
 def undo_last_change(category: str):
     """Restore the previous version of a category file using S3 versioning."""
-    if category not in VALID_CATEGORIES:
+    if category not in _get_valid_category_ids():
         return {"error": f"Invalid category: {category}"}, 400
 
     key = f"{LEARNED_PREFIX}{category}.md"
