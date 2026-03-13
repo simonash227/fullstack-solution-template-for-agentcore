@@ -359,7 +359,21 @@ export class BackendStack extends cdk.NestedStack {
             `arn:aws:s3:::${this.workspaceBucketName}/map.md`,
             `arn:aws:s3:::${this.workspaceBucketName}/overrides/base-persona.md`,
             `arn:aws:s3:::${this.workspaceBucketName}/overrides/map.md`,
+            `arn:aws:s3:::${this.workspaceBucketName}/skills/*`,
+            `arn:aws:s3:::${this.workspaceBucketName}/overrides/skills/*`,
           ],
+        })
+      )
+      // List skill files for dynamic skill catalog at agent init
+      agentRole.addToPolicy(
+        new iam.PolicyStatement({
+          sid: "WorkspaceSkillList",
+          effect: iam.Effect.ALLOW,
+          actions: ["s3:ListBucket"],
+          resources: [`arn:aws:s3:::${this.workspaceBucketName}`],
+          conditions: {
+            StringLike: { "s3:prefix": ["skills/*", "overrides/skills/*"] },
+          },
         })
       )
       if (this.workspaceKeyArn) {
@@ -1764,16 +1778,13 @@ export class BackendStack extends cdk.NestedStack {
         })
       )
 
-      // List access for learned entries
+      // List access for all workspace files (needed for override checks and listing rooms/skills)
       workspaceLambda.addToRolePolicy(
         new iam.PolicyStatement({
           sid: "WorkspaceList",
           effect: iam.Effect.ALLOW,
           actions: ["s3:ListBucket"],
           resources: [`arn:aws:s3:::${this.workspaceBucketName}`],
-          conditions: {
-            StringLike: { "s3:prefix": "learned/active/*" },
-          },
         })
       )
 
