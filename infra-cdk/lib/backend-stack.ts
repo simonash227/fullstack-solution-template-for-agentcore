@@ -7,6 +7,7 @@ import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager"
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb"
 import * as apigateway from "aws-cdk-lib/aws-apigateway"
 import * as logs from "aws-cdk-lib/aws-logs"
+import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch"
 import * as s3 from "aws-cdk-lib/aws-s3"
 import * as agentcore from "@aws-cdk/aws-bedrock-agentcore-alpha"
 import * as bedrockagentcore from "aws-cdk-lib/aws-bedrockagentcore"
@@ -143,6 +144,19 @@ export class BackendStack extends cdk.NestedStack {
     if (props.workspaceBucketName) {
       this.createWorkspaceAdminApi(props.config, props.frontendUrl)
     }
+
+    // Create Integrations Admin API (OAuth connection management)
+    this.createIntegrationsApi(props.config, props.frontendUrl)
+
+    // Create Transcribe API (Step 16a — voice-to-text presigned URL + batch transcription)
+    if (props.config.client?.channels?.voiceToText?.enabled) {
+      this.createTranscribeApi(props.config, props.frontendUrl)
+    }
+
+    // Create WhatsApp webhook (Step 16d — incoming messages + voice notes)
+    if (props.config.client?.channels?.whatsapp?.enabled) {
+      this.createWhatsAppWebhook(props.config, props.frontendUrl, auditTable)
+    }
   }
 
   private createAgentCoreRuntime(config: AppConfig): void {
@@ -269,7 +283,7 @@ export class BackendStack extends cdk.NestedStack {
     // Configure JWT authorizer with Cognito
     const authorizerConfiguration = agentcore.RuntimeAuthorizerConfiguration.usingJWT(
       `https://cognito-idp.${stack.region}.amazonaws.com/${this.userPoolId}/.well-known/openid-configuration`,
-      [this.userPoolClientId]
+      [this.userPoolClientId, this.machineClient.userPoolClientId]
     )
 
     // Create AgentCore execution role
@@ -314,8 +328,9 @@ export class BackendStack extends cdk.NestedStack {
         },
       },
     })
-    const memoryId = memory.getAtt("MemoryId").toString()
-    const memoryArn = memory.getAtt("MemoryArn").toString()
+    // TEMP: Hardcoded after out-of-band memory delete/recreate. Remove once CFn state is clean.
+    const memoryId = "FASTstackFASTstackbackend82B4A665-MNVG0kBRke"
+    const memoryArn = `arn:aws:bedrock-agentcore:${stack.region}:${stack.account}:memory/${memoryId}`
 
     // Store the memory ARN for access from main stack
     this.memoryArn = memoryArn
@@ -359,20 +374,20 @@ export class BackendStack extends cdk.NestedStack {
             `arn:aws:s3:::${this.workspaceBucketName}/map.md`,
             `arn:aws:s3:::${this.workspaceBucketName}/overrides/base-persona.md`,
             `arn:aws:s3:::${this.workspaceBucketName}/overrides/map.md`,
-            `arn:aws:s3:::${this.workspaceBucketName}/skills/*`,
-            `arn:aws:s3:::${this.workspaceBucketName}/overrides/skills/*`,
+            `arn:aws:s3:::${this.workspaceBucketName}/domains/*`,
+            `arn:aws:s3:::${this.workspaceBucketName}/overrides/domains/*`,
           ],
         })
       )
-      // List skill files for dynamic skill catalog at agent init
+      // List domain files for dynamic domain catalog at agent init
       agentRole.addToPolicy(
         new iam.PolicyStatement({
-          sid: "WorkspaceSkillList",
+          sid: "WorkspaceDomainList",
           effect: iam.Effect.ALLOW,
           actions: ["s3:ListBucket"],
           resources: [`arn:aws:s3:::${this.workspaceBucketName}`],
           conditions: {
-            StringLike: { "s3:prefix": ["skills/*", "overrides/skills/*"] },
+            StringLike: { "s3:prefix": ["domains/*", "overrides/domains/*"] },
           },
         })
       )
@@ -448,6 +463,8 @@ export class BackendStack extends cdk.NestedStack {
       AUDIT_TABLE_NAME: `${config.stack_name_base}-audit`, // Step 5b: DynamoDB audit table for tool call logging
       WORKSPACE_BUCKET: this.workspaceBucketName || "", // Step 12c: workspace files in dedicated workspace bucket
       WORKSPACE_PREFIX: "", // Workspace files at bucket root (no prefix needed — dedicated bucket)
+      AGENT_NAME: config.client?.branding?.agentName || "Assistant", // Step 13a: from client-config.json
+      FIRM_NAME: config.client?.branding?.firmName || "the firm", // Step 13a: from client-config.json
     }
 
     // Create the runtime using L2 construct
@@ -776,6 +793,33 @@ export class BackendStack extends cdk.NestedStack {
             cachingEnabled: false,
           },
           "/knowledge/{category}/{index}/GET": {
+            cachingEnabled: false,
+          },
+          // Disable caching for transcribe presigned URL (unique per request)
+          "/transcribe/presigned-url/GET": {
+            cachingEnabled: false,
+          },
+          "/transcribe/audio/POST": {
+            cachingEnabled: false,
+          },
+          // Disable caching for WhatsApp webhook (every request is unique)
+          "/whatsapp/GET": {
+            cachingEnabled: false,
+          },
+          "/whatsapp/POST": {
+            cachingEnabled: false,
+          },
+          // Disable caching for integrations admin endpoints
+          "/integrations/GET": {
+            cachingEnabled: false,
+          },
+          "/integrations/{provider}/DELETE": {
+            cachingEnabled: false,
+          },
+          "/integrations/{provider}/auth-url/GET": {
+            cachingEnabled: false,
+          },
+          "/integrations/{provider}/callback/GET": {
             cachingEnabled: false,
           },
         },
@@ -1317,6 +1361,105 @@ export class BackendStack extends cdk.NestedStack {
     learnedResource.addMethod("DELETE", wsLambdaIntegration, wsAuthMethodOptions)
   }
 
+  private createIntegrationsApi(config: AppConfig, frontendUrl: string): void {
+    const stackNameLower = config.stack_name_base.toLowerCase()
+    const oauthAppsSecretId = `/agentcore/${stackNameLower}/oauth-apps`
+
+    const integrationsLambda = new PythonFunction(this, "IntegrationsAdminLambda", {
+      functionName: `${config.stack_name_base}-integrations-admin`,
+      runtime: lambda.Runtime.PYTHON_3_13,
+      architecture: lambda.Architecture.ARM_64,
+      entry: path.join(__dirname, "..", "lambdas", "integrations-admin"),
+      handler: "handler",
+      environment: {
+        STACK_NAME: stackNameLower,
+        OAUTH_APPS_SECRET_ID: oauthAppsSecretId,
+        FRONTEND_URL: frontendUrl,
+        CORS_ALLOWED_ORIGINS: `${frontendUrl},http://localhost:3000`,
+      },
+      timeout: cdk.Duration.seconds(30),
+      layers: [
+        lambda.LayerVersion.fromLayerVersionArn(
+          this,
+          "IntegrationsAdminPowertoolsLayer",
+          `arn:aws:lambda:${
+            cdk.Stack.of(this).region
+          }:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-arm64:18`
+        ),
+      ],
+      logGroup: new logs.LogGroup(this, "IntegrationsAdminLambdaLogGroup", {
+        logGroupName: `/aws/lambda/${config.stack_name_base}-integrations-admin`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
+
+    // IAM: read oauth-apps secret
+    integrationsLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "ReadOAuthApps",
+        effect: iam.Effect.ALLOW,
+        actions: ["secretsmanager:GetSecretValue"],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:${oauthAppsSecretId}*`,
+        ],
+      })
+    )
+
+    // IAM: full CRUD on per-provider secrets (/agentcore/{stack}/*/oauth*)
+    integrationsLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "ManageConnectorSecrets",
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:PutSecretValue",
+          "secretsmanager:CreateSecret",
+          "secretsmanager:DeleteSecret",
+          "secretsmanager:DescribeSecret",
+        ],
+        resources: [
+          `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/agentcore/${stackNameLower}/*/oauth*`,
+        ],
+      })
+    )
+
+    // API Gateway routes
+    const integrationsResource = this.restApi.root.addResource("integrations")
+    const intLambdaIntegration = new apigateway.LambdaIntegration(integrationsLambda)
+
+    const intAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(
+      this,
+      "IntegrationsApiAuthorizer",
+      {
+        cognitoUserPools: [this.userPool],
+        identitySource: "method.request.header.Authorization",
+        authorizerName: `${config.stack_name_base}-integrations-authorizer`,
+      }
+    )
+    const intAuthMethodOptions = {
+      authorizer: intAuthorizer,
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+    }
+
+    // GET /integrations — list all integration statuses (authenticated)
+    integrationsResource.addMethod("GET", intLambdaIntegration, intAuthMethodOptions)
+
+    // /integrations/{provider}
+    const providerResource = integrationsResource.addResource("{provider}")
+
+    // DELETE /integrations/{provider} — disconnect (authenticated)
+    providerResource.addMethod("DELETE", intLambdaIntegration, intAuthMethodOptions)
+
+    // /integrations/{provider}/auth-url — GET (authenticated)
+    const authUrlResource = providerResource.addResource("auth-url")
+    authUrlResource.addMethod("GET", intLambdaIntegration, intAuthMethodOptions)
+
+    // /integrations/{provider}/callback — GET (NO auth — OAuth redirect from provider)
+    const callbackResource = providerResource.addResource("callback")
+    callbackResource.addMethod("GET", intLambdaIntegration)
+  }
+
   private createAgentCoreGateway(config: AppConfig, knowledgeBaseId?: string): void {
     // Create sample tool Lambda
     const toolLambda = new lambda.Function(this, "SampleToolLambda", {
@@ -1738,6 +1881,127 @@ export class BackendStack extends cdk.NestedStack {
       description: "Gmail Connector Gateway Target ID",
     })
 
+    // ─── Xero Accounting connector (Step 14) ────────────────────────
+    // Provides read-only financial data: P&L, bank balances, invoices, bills, contacts.
+    // Xero rotates refresh tokens — Lambda needs GetSecretValue + PutSecretValue.
+    const xeroSecretArn = `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/agentcore/${config.stack_name_base.toLowerCase()}/xero/oauth*`
+
+    const xeroLambda = new lambda.Function(this, "XeroConnectorLambda", {
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: "xero_connector_lambda.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../../gateway/tools/xero_connector")),
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        XERO_SECRET_ARN: `/agentcore/${config.stack_name_base.toLowerCase()}/xero/oauth`,
+      },
+      logGroup: new logs.LogGroup(this, "XeroLambdaLogGroup", {
+        logGroupName: `/aws/lambda/${config.stack_name_base}-xero-connector`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
+
+    xeroLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "ReadWriteXeroSecret",
+        effect: iam.Effect.ALLOW,
+        actions: ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"],
+        resources: [xeroSecretArn],
+      })
+    )
+
+    xeroLambda.grantInvoke(gatewayRole)
+
+    const xeroToolSpecPath = path.join(__dirname, "../../gateway/tools/xero_connector/tool_spec.json")
+    const xeroToolSpec = JSON.parse(fs.readFileSync(xeroToolSpecPath, "utf8"))
+
+    const xeroGatewayTarget = new bedrockagentcore.CfnGatewayTarget(this, "XeroConnectorTarget", {
+      gatewayIdentifier: gateway.attrGatewayIdentifier,
+      name: "xero-connector-target",
+      description: "Xero Accounting — financial reports, invoices, bills, contacts (read-only)",
+      targetConfiguration: {
+        mcp: {
+          lambda: {
+            lambdaArn: xeroLambda.functionArn,
+            toolSchema: {
+              inlinePayload: xeroToolSpec,
+            },
+          },
+        },
+      },
+      credentialProviderConfigurations: [
+        {
+          credentialProviderType: "GATEWAY_IAM_ROLE",
+        },
+      ],
+    })
+    xeroGatewayTarget.addDependency(gateway)
+
+    new cdk.CfnOutput(this, "XeroConnectorTargetId", {
+      value: xeroGatewayTarget.ref,
+      description: "Xero Connector Gateway Target ID",
+    })
+
+    // ─── Slack connector (Step 14) ──────────────────────────────────
+    // Read channels/messages, search, send messages/DMs. Bot tokens don't expire.
+    const slackSecretArn = `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/agentcore/${config.stack_name_base.toLowerCase()}/slack/oauth*`
+
+    const slackLambda = new lambda.Function(this, "SlackConnectorLambda", {
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: "slack_connector_lambda.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../../gateway/tools/slack_connector")),
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        SLACK_SECRET_ARN: `/agentcore/${config.stack_name_base.toLowerCase()}/slack/oauth`,
+      },
+      logGroup: new logs.LogGroup(this, "SlackLambdaLogGroup", {
+        logGroupName: `/aws/lambda/${config.stack_name_base}-slack-connector`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
+
+    slackLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        sid: "ReadSlackSecret",
+        effect: iam.Effect.ALLOW,
+        actions: ["secretsmanager:GetSecretValue"],
+        resources: [slackSecretArn],
+      })
+    )
+
+    slackLambda.grantInvoke(gatewayRole)
+
+    const slackToolSpecPath = path.join(__dirname, "../../gateway/tools/slack_connector/tool_spec.json")
+    const slackToolSpec = JSON.parse(fs.readFileSync(slackToolSpecPath, "utf8"))
+
+    const slackGatewayTarget = new bedrockagentcore.CfnGatewayTarget(this, "SlackConnectorTarget", {
+      gatewayIdentifier: gateway.attrGatewayIdentifier,
+      name: "slack-connector-target",
+      description: "Slack — read channels, search messages, send messages and DMs",
+      targetConfiguration: {
+        mcp: {
+          lambda: {
+            lambdaArn: slackLambda.functionArn,
+            toolSchema: {
+              inlinePayload: slackToolSpec,
+            },
+          },
+        },
+      },
+      credentialProviderConfigurations: [
+        {
+          credentialProviderType: "GATEWAY_IAM_ROLE",
+        },
+      ],
+    })
+    slackGatewayTarget.addDependency(gateway)
+
+    new cdk.CfnOutput(this, "SlackConnectorTargetId", {
+      value: slackGatewayTarget.ref,
+      description: "Slack Connector Gateway Target ID",
+    })
+
     // ─── Workspace Manager tool (Step 12c) ──────────────────────────
     // Provides read/write/list access to the agent's modular workspace in S3.
     // Writes restricted to learned/active/ only via IAM + Lambda code.
@@ -2040,5 +2304,323 @@ export class BackendStack extends cdk.NestedStack {
   private hashContent(content: string): string {
     const crypto = require("crypto")
     return crypto.createHash("sha256").update(content).digest("hex").slice(0, 16)
+  }
+
+  /**
+   * Step 16a: Transcribe API — presigned WebSocket URL for streaming + batch transcription.
+   *
+   * API Contract - GET /transcribe/presigned-url
+   * Authorization: Bearer <cognito-access-token> (required)
+   * Query params:
+   *   language_code: string (optional, default "en-AU")
+   *   sample_rate: number (optional, default 16000)
+   *
+   * Success Response (200):
+   *   { url: string, expires_in: number }
+   *
+   * Direct Lambda invocation (for WhatsApp webhook):
+   *   Input:  { action: "transcribe_file", s3_uri: "s3://bucket/key", language_code?: string }
+   *   Output: { transcript: string } | { error: string }
+   *
+   * Implementation: infra-cdk/lambdas/transcribe/index.py
+   */
+  private createTranscribeApi(config: AppConfig, frontendUrl: string): void {
+    const transcribeLambda = new PythonFunction(this, "TranscribeLambda", {
+      functionName: `${config.stack_name_base}-transcribe`,
+      runtime: lambda.Runtime.PYTHON_3_13,
+      architecture: lambda.Architecture.ARM_64,
+      entry: path.join(__dirname, "..", "lambdas", "transcribe"),
+      handler: "handler",
+      environment: {
+        DEFAULT_LANGUAGE: "en-AU",
+        CORS_ALLOWED_ORIGINS: `${frontendUrl},http://localhost:3000`,
+        OPS_BUCKET: `${config.stack_name_base.toLowerCase()}-ops-${cdk.Stack.of(this).account}`,
+        // Set after Lambda creation below
+      },
+      timeout: cdk.Duration.seconds(120),
+      layers: [
+        lambda.LayerVersion.fromLayerVersionArn(
+          this,
+          "TranscribePowertoolsLayer",
+          `arn:aws:lambda:${
+            cdk.Stack.of(this).region
+          }:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-arm64:18`
+        ),
+      ],
+      logGroup: new logs.LogGroup(this, "TranscribeLambdaLogGroup", {
+        logGroupName: `/aws/lambda/${config.stack_name_base}-transcribe`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
+
+    // Pass Lambda's own role ARN so Transcribe can use it for S3/KMS access
+    transcribeLambda.addEnvironment("DATA_ACCESS_ROLE_ARN", transcribeLambda.role!.roleArn)
+
+    // Allow Transcribe service to assume the Lambda's role
+    ;(transcribeLambda.role as iam.Role).assumeRolePolicy!.addStatements(
+      new iam.PolicyStatement({
+        actions: ["sts:AssumeRole"],
+        principals: [new iam.ServicePrincipal("transcribe.amazonaws.com")],
+      })
+    )
+
+    // IAM: PassRole so Lambda can pass its own role to Transcribe via DataAccessRoleArn
+    transcribeLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["iam:PassRole"],
+        resources: [transcribeLambda.role!.roleArn],
+        conditions: {
+          StringEquals: { "iam:PassedToService": "transcribe.amazonaws.com" },
+        },
+      })
+    )
+
+    // IAM: Transcribe streaming (presigned URL credentials) + batch transcription
+    transcribeLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "transcribe:StartStreamTranscription",
+          "transcribe:StartTranscriptionJob",
+          "transcribe:GetTranscriptionJob",
+          "transcribe:DeleteTranscriptionJob",
+        ],
+        resources: ["*"],
+      })
+    )
+
+    // IAM: S3 access for audio files (upload from browser, read for Transcribe, cleanup)
+    const opsBucketName = `${config.stack_name_base.toLowerCase()}-ops-${cdk.Stack.of(this).account}`
+    transcribeLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+        resources: [`arn:aws:s3:::${opsBucketName}/voice-input/*`],
+      })
+    )
+    // KMS: ops bucket uses KMS encryption
+    transcribeLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["kms:GenerateDataKey", "kms:Decrypt"],
+        resources: [`arn:aws:kms:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:key/*`],
+      })
+    )
+    // Transcribe needs GetObject on any bucket (it reads from its own output bucket too)
+    transcribeLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:GetObject"],
+        resources: ["arn:aws:s3:::*"],
+      })
+    )
+
+    // Add /transcribe/presigned-url resource to the existing REST API
+    const transcribeAuthorizer = new apigateway.CognitoUserPoolsAuthorizer(
+      this,
+      "TranscribeApiAuthorizer",
+      {
+        cognitoUserPools: [this.userPool],
+        identitySource: "method.request.header.Authorization",
+        authorizerName: `${config.stack_name_base}-transcribe-authorizer`,
+      }
+    )
+
+    const transcribeResource = this.restApi.root.addResource("transcribe")
+    const presignedUrlResource = transcribeResource.addResource("presigned-url")
+    presignedUrlResource.addMethod(
+      "GET",
+      new apigateway.LambdaIntegration(transcribeLambda),
+      {
+        authorizer: transcribeAuthorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    )
+
+    // POST /transcribe/audio — receive base64 audio, transcribe, return text
+    const audioResource = transcribeResource.addResource("audio")
+    audioResource.addMethod(
+      "POST",
+      new apigateway.LambdaIntegration(transcribeLambda),
+      {
+        authorizer: transcribeAuthorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    )
+
+    // Export Lambda ARN for WhatsApp webhook to invoke directly
+    new cdk.CfnOutput(this, "TranscribeLambdaArn", {
+      value: transcribeLambda.functionArn,
+      description: "Transcribe Lambda ARN for direct invocation",
+    })
+  }
+
+  /**
+   * Step 16d+16e: WhatsApp Webhook — incoming messages, voice notes, user mappings.
+   *
+   * Creates:
+   * - WhatsApp user-mappings DynamoDB table (partition key: phoneNumber in E.164)
+   * - WhatsApp webhook Lambda (handles GET verification + POST messages)
+   * - API Gateway endpoints (no Cognito auth — Meta sends webhooks directly)
+   *
+   * Webhook endpoints:
+   *   GET  /whatsapp — Meta verification challenge (hub.verify_token)
+   *   POST /whatsapp — Incoming messages (text + voice notes)
+   *
+   * Implementation: infra-cdk/lambdas/whatsapp-webhook/index.py
+   */
+  private createWhatsAppWebhook(
+    config: AppConfig,
+    frontendUrl: string,
+    auditTable: dynamodb.Table
+  ): void {
+    const clientChannels = config.client!.channels!.whatsapp!
+
+    // Step 16e: WhatsApp user-mappings DynamoDB table
+    const userMappingsTable = new dynamodb.Table(this, "WhatsAppUserMappingsTable", {
+      tableName: `${config.stack_name_base}-whatsapp-mappings`,
+      partitionKey: { name: "phoneNumber", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      pointInTimeRecovery: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    })
+
+    // Step 16f: Pending approvals table for WhatsApp approval flow
+    const pendingApprovalsTable = new dynamodb.Table(this, "WhatsAppPendingApprovalsTable", {
+      tableName: `${config.stack_name_base}-pending-approvals`,
+      partitionKey: { name: "phoneNumber", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: "ttl",
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    })
+
+    // Import existing secrets — use lowercase clientId for secret name
+    // (secrets are created with lowercase clientId via CLI/deploy scripts)
+    const clientIdLower = config.stack_name_base.toLowerCase()
+    const whatsappSecret = secretsmanager.Secret.fromSecretNameV2(
+      this, "WhatsAppSecret",
+      `/agentcore/${clientIdLower}/whatsapp/access-token`
+    )
+
+    // Ops bucket for temporary voice note storage
+    const opsBucketName = `${config.stack_name_base.toLowerCase()}-ops-${cdk.Stack.of(this).account}`
+
+    // Cognito domain for token endpoint
+    const cognitoDomain = `https://${this.userPoolDomain.domainName}.auth.${cdk.Aws.REGION}.amazoncognito.com`
+
+    const webhookLambda = new PythonFunction(this, "WhatsAppWebhookLambda", {
+      functionName: `${config.stack_name_base}-wa-webhook`,
+      runtime: lambda.Runtime.PYTHON_3_13,
+      architecture: lambda.Architecture.ARM_64,
+      entry: path.join(__dirname, "..", "lambdas", "whatsapp-webhook"),
+      handler: "handler",
+      environment: {
+        PHONE_NUMBER_ID: clientChannels.phoneNumberId || "",
+        WHATSAPP_SECRET_ARN: whatsappSecret.secretArn,
+        VERIFY_TOKEN: "agentcore-webhook-verify",
+        RUNTIME_ARN: this.runtimeArn,
+        COGNITO_DOMAIN: cognitoDomain,
+        MACHINE_CLIENT_ID: this.machineClient.userPoolClientId,
+        MACHINE_CLIENT_SECRET_ARN: this.machineClientSecret.secretArn,
+        RESOURCE_SERVER_ID: `${config.stack_name_base}-gateway`,
+        USER_MAPPINGS_TABLE: userMappingsTable.tableName,
+        AUDIT_TABLE: auditTable.tableName,
+        PENDING_APPROVALS_TABLE: pendingApprovalsTable.tableName,
+        OPS_BUCKET: opsBucketName,
+        ...(config.client?.channels?.voiceToText?.enabled ? {
+          TRANSCRIBE_LAMBDA_ARN: `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:${config.stack_name_base}-transcribe`,
+        } : {}),
+      },
+      timeout: cdk.Duration.seconds(300),
+      layers: [
+        lambda.LayerVersion.fromLayerVersionArn(
+          this,
+          "WhatsAppPowertoolsLayer",
+          `arn:aws:lambda:${
+            cdk.Stack.of(this).region
+          }:017000801446:layer:AWSLambdaPowertoolsPythonV3-python313-arm64:18`
+        ),
+      ],
+      logGroup: new logs.LogGroup(this, "WhatsAppWebhookLogGroup", {
+        logGroupName: `/aws/lambda/${config.stack_name_base}-wa-webhook`,
+        retention: logs.RetentionDays.ONE_WEEK,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
+    })
+
+    // IAM permissions
+    userMappingsTable.grantReadData(webhookLambda)
+    pendingApprovalsTable.grantReadWriteData(webhookLambda)
+    auditTable.grantWriteData(webhookLambda)
+    whatsappSecret.grantRead(webhookLambda)
+    this.machineClientSecret.grantRead(webhookLambda)
+
+    // S3: read/write voice notes to ops bucket
+    webhookLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:PutObject", "s3:DeleteObject"],
+        resources: [`arn:aws:s3:::${opsBucketName}/whatsapp-voice/*`],
+      })
+    )
+
+    // Invoke Transcribe Lambda for voice notes
+    webhookLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["lambda:InvokeFunction"],
+        resources: [`arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:${config.stack_name_base}-transcribe`],
+      })
+    )
+
+    // Add /whatsapp resource to the existing REST API — NO Cognito auth (Meta sends webhooks directly)
+    const whatsappResource = this.restApi.root.addResource("whatsapp")
+
+    // GET: Webhook verification (Meta sends hub.verify_token challenge)
+    whatsappResource.addMethod(
+      "GET",
+      new apigateway.LambdaIntegration(webhookLambda)
+    )
+
+    // POST: Incoming messages
+    whatsappResource.addMethod(
+      "POST",
+      new apigateway.LambdaIntegration(webhookLambda)
+    )
+
+    // Output the webhook URL for Meta configuration
+    new cdk.CfnOutput(this, "WhatsAppWebhookUrl", {
+      value: `${this.restApi.url}whatsapp`,
+      description: "WhatsApp webhook URL — register this in Meta Developer Console",
+    })
+
+    new cdk.CfnOutput(this, "WhatsAppVerifyToken", {
+      value: "agentcore-webhook-verify",
+      description: "WhatsApp webhook verify token",
+    })
+
+    // Step 16g: CloudWatch alarms for WhatsApp webhook
+    new cloudwatch.Alarm(this, "WhatsAppWebhookErrorAlarm", {
+      alarmName: `${config.stack_name_base}-wa-webhook-errors`,
+      alarmDescription: "WhatsApp webhook error rate > 5%",
+      metric: webhookLambda.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: "Sum",
+      }),
+      threshold: 5,
+      evaluationPeriods: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    })
+
+    new cloudwatch.Alarm(this, "WhatsAppWebhookLatencyAlarm", {
+      alarmName: `${config.stack_name_base}-wa-webhook-latency`,
+      alarmDescription: "WhatsApp webhook latency p99 > 10 seconds",
+      metric: webhookLambda.metricDuration({
+        period: cdk.Duration.minutes(5),
+        statistic: "p99",
+      }),
+      threshold: 10000,
+      evaluationPeriods: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    })
   }
 }

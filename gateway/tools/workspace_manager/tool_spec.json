@@ -1,22 +1,27 @@
 [
   {
     "name": "workspace_manager",
-    "description": "Read workspace files (rooms, skills, client context) or list learned knowledge entries. Use this tool to load task-specific instructions before responding.",
+    "description": "Load workspace files (domain context, workflows, learned knowledge). Use batch_read for the initial load — pass all needed paths in one call. Use read for single files mid-conversation. Use list for learned knowledge categories.",
     "inputSchema": {
       "type": "object",
       "properties": {
         "action": {
           "type": "string",
-          "enum": ["read", "list"],
-          "description": "Action to perform: read a workspace file, or list learned knowledge entries"
+          "enum": ["read", "batch_read", "list"],
+          "description": "Action: read (single file), batch_read (multiple files in one call), or list (learned knowledge entries)"
         },
         "path": {
           "type": "string",
-          "description": "Relative path within the workspace (for read action), e.g. rooms/executive-briefing.md"
+          "description": "Relative path for read action, e.g. domains/finance/context.md"
+        },
+        "paths": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Array of relative paths for batch_read action, e.g. [\"domains/finance/context.md\", \"domains/finance/workflows/payment-chase.md\", \"learned/active/company.md\"]"
         },
         "category": {
           "type": "string",
-          "description": "Knowledge category to list entries for (for list action). Omit to list all categories."
+          "description": "Knowledge category for list action. Omit to list all categories."
         }
       },
       "required": ["action"]

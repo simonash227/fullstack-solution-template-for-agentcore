@@ -30,12 +30,12 @@ import {
 } from "@/services/workspaceService"
 import { ErrorBanner } from "@/components/shared/ErrorBanner"
 import { EmptyState } from "@/components/shared/EmptyState"
+import { IntegrationsPanel } from "@/components/admin/IntegrationsPanel"
 
-const CATEGORY_ORDER = ["root", "rooms", "skills", "client"]
+const CATEGORY_ORDER = ["root", "domains", "client"]
 const CATEGORY_LABELS: Record<string, string> = {
   root: "Root Files",
-  rooms: "Rooms",
-  skills: "Skills",
+  domains: "Domains",
   client: "Client Context",
 }
 
@@ -460,6 +460,9 @@ function AdminContent() {
                 </div>
               )}
             </div>
+
+            {/* Integrations section */}
+            {token && <IntegrationsPanel token={token} />}
           </div>
         )}
       </div>

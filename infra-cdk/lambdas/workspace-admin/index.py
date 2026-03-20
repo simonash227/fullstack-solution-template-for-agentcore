@@ -31,7 +31,7 @@ logger = Logger()
 app = APIGatewayRestResolver(cors=cors_config)
 
 # Valid workspace file categories (excludes learned/ — separate routes)
-VALID_CATEGORIES = {"rooms/", "skills/", "client/"}
+VALID_CATEGORIES = {"domains/", "client/"}
 VALID_ROOT_FILES = {"map.md", "base-persona.md"}
 PROTECTED_FILES = {"map.md", "base-persona.md"}  # Can override but not delete
 LEARNED_PREFIX = "learned/active/"
@@ -158,10 +158,8 @@ def list_workspace_files():
         # Determine category
         if key in VALID_ROOT_FILES:
             category = "root"
-        elif key.startswith("rooms/"):
-            category = "rooms"
-        elif key.startswith("skills/"):
-            category = "skills"
+        elif key.startswith("domains/"):
+            category = "domains"
         elif key.startswith("client/"):
             category = "client"
         else:
@@ -183,10 +181,8 @@ def list_workspace_files():
         if original_path not in seen_paths:
             if original_path in VALID_ROOT_FILES:
                 category = "root"
-            elif original_path.startswith("rooms/"):
-                category = "rooms"
-            elif original_path.startswith("skills/"):
-                category = "skills"
+            elif original_path.startswith("domains/"):
+                category = "domains"
             elif original_path.startswith("client/"):
                 category = "client"
             else:

@@ -28,10 +28,102 @@ app = BedrockAgentCoreApp()
 
 # System prompt cache: assembled from workspace S3 files with 5-minute TTL
 _prompt_cache: dict = {"text": None, "loaded_at": 0.0}
-PROMPT_CACHE_TTL_SECONDS = 300  # 5 minutes
+PROMPT_CACHE_TTL_SECONDS = 0  # TEMP: disabled for testing — restore to 300 before first client deploy
 
 WORKSPACE_BUCKET = os.environ.get("WORKSPACE_BUCKET", "")
 WORKSPACE_PREFIX = os.environ.get("WORKSPACE_PREFIX", "")
+
+
+def _read_s3_file(s3, key: str) -> str | None:
+    """Read a file from S3, returning None if not found."""
+    try:
+        response = s3.get_object(Bucket=WORKSPACE_BUCKET, Key=key)
+        return response["Body"].read().decode("utf-8")
+    except (s3.exceptions.NoSuchKey, ClientError):
+        return None
+
+
+def _read_with_override(s3, path: str) -> str:
+    """Read a workspace file, checking overrides/ first."""
+    override_key = f"{WORKSPACE_PREFIX}overrides/{path}"
+    core_key = f"{WORKSPACE_PREFIX}{path}"
+
+    print(f"[PROMPT] Checking override s3://{WORKSPACE_BUCKET}/{override_key}")
+    content = _read_s3_file(s3, override_key)
+    if content is not None:
+        print(f"[PROMPT] Using override version for {path}")
+        return content
+
+    print(f"[PROMPT] No override, loading core s3://{WORKSPACE_BUCKET}/{core_key}")
+    response = s3.get_object(Bucket=WORKSPACE_BUCKET, Key=core_key)
+    return response["Body"].read().decode("utf-8")
+
+
+def _build_domain_catalog(s3) -> str:
+    """
+    Build the domain catalog dynamically by listing all domain context.md files from S3.
+
+    Discovers domains by listing domains/*/context.md (core + overrides).
+    For each domain, reads the frontmatter description and lists available workflows.
+    Overrides take precedence for both context.md and workflow files.
+    """
+    core_prefix = f"{WORKSPACE_PREFIX}domains/"
+    override_prefix = f"{WORKSPACE_PREFIX}overrides/domains/"
+
+    # Step 1: Discover domains by finding context.md files
+    domain_keys = {}  # domain_name -> context.md s3_key (overrides win)
+
+    for prefix in [core_prefix, override_prefix]:
+        paginator = s3.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=WORKSPACE_BUCKET, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                # Match pattern: {prefix}{domain}/context.md
+                rel = key[len(prefix):]
+                parts = rel.split("/")
+                if len(parts) == 2 and parts[1] == "context.md":
+                    domain_name = parts[0]
+                    domain_keys[domain_name] = key
+
+    if not domain_keys:
+        return "(no domains found)"
+
+    # Step 2: For each domain, read description and list workflows
+    lines = []
+    for domain_name in sorted(domain_keys):
+        key = domain_keys[domain_name]
+        content = _read_s3_file(s3, key)
+        desc = ""
+        if content:
+            in_frontmatter = False
+            for line in content.splitlines():
+                if line.strip() == "---":
+                    in_frontmatter = not in_frontmatter
+                    continue
+                if in_frontmatter and line.startswith("description:"):
+                    desc = line.split(":", 1)[1].strip()
+                    break
+
+        # List workflow files for this domain
+        workflow_names = set()
+        for wf_prefix in [
+            f"{core_prefix}{domain_name}/workflows/",
+            f"{override_prefix}{domain_name}/workflows/",
+        ]:
+            paginator = s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=WORKSPACE_BUCKET, Prefix=wf_prefix):
+                for obj in page.get("Contents", []):
+                    filename = obj["Key"].split("/")[-1]
+                    if filename.endswith(".md"):
+                        workflow_names.add(filename[:-3])
+
+        line = f"- **{domain_name}**: {desc or '(load to see details)'}"
+        if workflow_names:
+            line += f"\n  Workflows: {', '.join(sorted(workflow_names))}"
+        lines.append(line)
+
+    print(f"[PROMPT] Built domain catalog: {len(lines)} domains")
+    return "\n".join(lines)
 
 
 def get_system_prompt() -> str:
@@ -39,8 +131,10 @@ def get_system_prompt() -> str:
     Assemble the system prompt from workspace files in S3 with a 5-minute TTL cache.
 
     Reads base-persona.md and map.md from the workspace bucket, concatenates
-    them, and caches the result. Placeholder tokens ({{AGENT_NAME}}, {{FIRM_NAME}}, etc.)
-    are rendered at deploy time by assemble-workspace.py — not at runtime.
+    them, and caches the result. The domain catalog ({{DOMAIN_CATALOG}}) is built
+    dynamically by listing all domain context.md files and workflow files from S3
+    (core + overrides), so new domains/workflows added via the admin page are
+    discovered automatically.
 
     Returns:
         str: The assembled system prompt text.
@@ -53,22 +147,22 @@ def get_system_prompt() -> str:
         return _prompt_cache["text"]
 
     s3 = boto3.client("s3", region_name=os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-2"))
-    parts = []
-    for key in ["base-persona.md", "map.md"]:
-        override_key = f"{WORKSPACE_PREFIX}overrides/{key}"
-        full_key = f"{WORKSPACE_PREFIX}{key}"
-        # Check override first, fall back to core
-        try:
-            print(f"[PROMPT] Checking override s3://{WORKSPACE_BUCKET}/{override_key}")
-            response = s3.get_object(Bucket=WORKSPACE_BUCKET, Key=override_key)
-            parts.append(response["Body"].read().decode("utf-8"))
-            print(f"[PROMPT] Using override version for {key}")
-        except (s3.exceptions.NoSuchKey, ClientError):
-            print(f"[PROMPT] No override, loading core s3://{WORKSPACE_BUCKET}/{full_key}")
-            response = s3.get_object(Bucket=WORKSPACE_BUCKET, Key=full_key)
-            parts.append(response["Body"].read().decode("utf-8"))
 
-    text = "\n\n".join(parts)
+    # Read base files with override support
+    persona = _read_with_override(s3, "base-persona.md")
+    map_md = _read_with_override(s3, "map.md")
+
+    # Build live domain catalog and inject into map.md
+    domain_catalog = _build_domain_catalog(s3)
+    map_md = map_md.replace("{{DOMAIN_CATALOG}}", domain_catalog)
+
+    text = f"{persona}\n\n{map_md}"
+
+    # Resolve agent identity placeholders from environment
+    agent_name = os.environ.get("AGENT_NAME", "Assistant")
+    firm_name = os.environ.get("FIRM_NAME", "the firm")
+    text = text.replace("{{AGENT_NAME}}", agent_name)
+    text = text.replace("{{FIRM_NAME}}", firm_name)
 
     if not text.strip():
         raise ValueError("Assembled system prompt is empty")

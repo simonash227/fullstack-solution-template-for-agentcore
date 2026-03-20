@@ -34,6 +34,7 @@ export default function ChatInterface() {
   }>({})
   const [quickActions, setQuickActions] = useState<string[]>([])
   const [activeToolName, setActiveToolName] = useState<string | null>(null)
+  const [voiceEnabled, setVoiceEnabled] = useState(false)
 
   const { isLoading, setIsLoading } = useGlobal()
   const auth = useAuth()
@@ -73,6 +74,9 @@ export default function ChatInterface() {
         }
         if (config.quickActions) {
           setQuickActions(config.quickActions)
+        }
+        if (config.voiceEnabled) {
+          setVoiceEnabled(true)
         }
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : "Unknown error"
@@ -347,6 +351,7 @@ export default function ChatInterface() {
               setInput={setInput}
               handleSubmit={handleSubmit}
               isLoading={isLoading}
+              voiceEnabled={voiceEnabled}
             />
           </div>
 

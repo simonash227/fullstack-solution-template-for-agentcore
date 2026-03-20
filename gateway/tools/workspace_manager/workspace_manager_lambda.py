@@ -57,6 +57,27 @@ def _read_file(path: str) -> dict:
         }
 
 
+def _batch_read(paths: list) -> dict:
+    """Read multiple workspace files in a single invocation."""
+    if not paths:
+        return {"error": "paths array is required for batch_read action"}
+    if len(paths) > 10:
+        return {"error": "Maximum 10 paths per batch_read"}
+
+    sections = []
+    for path in paths:
+        try:
+            result = _read_file(path)
+            text = result.get("content", [{}])[0].get("text", "")
+            sections.append(f"=== {path} ===\n{text}")
+        except Exception as e:
+            sections.append(f"=== {path} ===\nError reading {path}: {e}")
+
+    return {
+        "content": [{"type": "text", "text": "\n\n".join(sections)}],
+    }
+
+
 def _list_entries(category: str = None) -> dict:
     """List learned knowledge entries."""
     if category:
@@ -120,6 +141,8 @@ def handler(event, context):
 
         if action == "read":
             return _read_file(event.get("path", ""))
+        elif action == "batch_read":
+            return _batch_read(event.get("paths", []))
         elif action == "write":
             return {
                 "content": [{"type": "text", "text": "Writing knowledge is managed by the team via the What I Know page in the app. You can read knowledge with the list action, but cannot write to it directly."}],
@@ -127,7 +150,7 @@ def handler(event, context):
         elif action == "list":
             return _list_entries(event.get("category"))
         else:
-            return {"error": f"Unknown action: {action}. Use read, write, or list."}
+            return {"error": f"Unknown action: {action}. Use read, batch_read, or list."}
 
     except ValueError as e:
         logger.warning(f"Validation error: {e}")

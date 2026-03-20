@@ -26,21 +26,23 @@ RUN uv pip install --no-cache -r requirements.txt && \
 RUN uv pip install --no-cache -e . --no-deps && \
     uv pip install --no-cache requests>=2.31.0
 
+# Copy agent code files and compile to bytecode (IP protection — run before USER switch)
+COPY patterns/strands-single-agent/basic_agent.py .
+COPY patterns/strands-single-agent/strands_code_interpreter.py .
+COPY patterns/strands-single-agent/tools/ tools/
+COPY patterns/utils/ utils/
+RUN python -m compileall -b -q . && \
+    find . -name "*.py" -not -name "__pycache__" -delete
+
 # Create non-root user
 RUN useradd -m -u 1000 bedrock_agentcore
 USER bedrock_agentcore
 
 EXPOSE 8080
 
-# Copy agent code files
-COPY patterns/strands-single-agent/basic_agent.py .
-COPY patterns/strands-single-agent/strands_code_interpreter.py .
-COPY patterns/strands-single-agent/tools/ tools/
-COPY patterns/utils/ utils/
-
 # Healthcheck using Python (no extra dependencies needed)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/ping', timeout=2)" || exit 1
 
-# Start agent with OpenTelemetry instrumentation
-CMD ["opentelemetry-instrument", "python", "-m", "basic_agent"]
+# Start agent with OpenTelemetry instrumentation (.pyc after source removal)
+CMD ["opentelemetry-instrument", "python", "basic_agent.pyc"]

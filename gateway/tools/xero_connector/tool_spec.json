@@ -1,0 +1,148 @@
+[
+  {
+    "name": "xero_executive_summary",
+    "description": "Get a one-page financial dashboard from Xero showing cash position, profitability, balance sheet, and performance metrics. Use this when the user asks for a business overview, financial health check, or general 'how are we doing' question.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string",
+          "description": "Report date in YYYY-MM-DD format (default: today)"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "xero_profit_and_loss",
+    "description": "Get a Profit and Loss (income statement) report from Xero for a date range. Shows revenue, expenses, and net profit. Use when the user asks about revenue, income, expenses, profitability, or margins.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "from_date": {
+          "type": "string",
+          "description": "Start date in YYYY-MM-DD format (default: first day of current month)"
+        },
+        "to_date": {
+          "type": "string",
+          "description": "End date in YYYY-MM-DD format (default: today)"
+        },
+        "periods": {
+          "type": "integer",
+          "description": "Number of comparison periods to include (1-12, default: 0 for no comparison)"
+        },
+        "timeframe": {
+          "type": "string",
+          "description": "Comparison period timeframe: MONTH, QUARTER, or YEAR (default: MONTH)"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "xero_bank_summary",
+    "description": "Get bank account balances and cash flow summary from Xero. Shows opening balance, cash received, cash spent, and closing balance for each bank account. Use when the user asks about cash position, bank balances, or cash flow.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "from_date": {
+          "type": "string",
+          "description": "Start date in YYYY-MM-DD format (default: first day of current month)"
+        },
+        "to_date": {
+          "type": "string",
+          "description": "End date in YYYY-MM-DD format (default: today)"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "xero_balance_sheet",
+    "description": "Get a Balance Sheet report from Xero showing assets, liabilities, and equity. Use when the user asks about net assets, what the company owns/owes, or the balance sheet.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string",
+          "description": "Balance sheet date in YYYY-MM-DD format (default: today)"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "xero_list_invoices",
+    "description": "List sales invoices (accounts receivable) from Xero. Shows what clients owe the firm. Use when the user asks about outstanding invoices, money owed to us, accounts receivable, or debtor balances. Also use to check overdue invoices.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Filter by status: AUTHORISED (unpaid), PAID, DRAFT, OVERDUE, or ALL (default: AUTHORISED)"
+        },
+        "from_date": {
+          "type": "string",
+          "description": "Only invoices dated on or after this date (YYYY-MM-DD)"
+        },
+        "contact_name": {
+          "type": "string",
+          "description": "Filter by client/contact name (partial match)"
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of invoices to return (default 20, max 50)"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "xero_list_bills",
+    "description": "List bills (accounts payable) from Xero. Shows what the firm owes to suppliers. Use when the user asks about outstanding bills, money we owe, accounts payable, or creditor balances.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Filter by status: AUTHORISED (unpaid), PAID, DRAFT, OVERDUE, or ALL (default: AUTHORISED)"
+        },
+        "from_date": {
+          "type": "string",
+          "description": "Only bills dated on or after this date (YYYY-MM-DD)"
+        },
+        "contact_name": {
+          "type": "string",
+          "description": "Filter by supplier/contact name (partial match)"
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of bills to return (default 20, max 50)"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "xero_list_contacts",
+    "description": "List or search contacts (clients and suppliers) in Xero. Use when the user asks about clients, suppliers, contact details, or wants to look up a specific person or company.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "search": {
+          "type": "string",
+          "description": "Search term to filter contacts by name or email"
+        },
+        "is_customer": {
+          "type": "boolean",
+          "description": "Filter to only customers (true) or only suppliers (false). Omit for both."
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of contacts to return (default 20, max 50)"
+        }
+      },
+      "required": []
+    }
+  }
+]

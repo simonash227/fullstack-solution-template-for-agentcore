@@ -1,0 +1,114 @@
+[
+  {
+    "name": "slack_list_channels",
+    "description": "List Slack channels the bot has access to. Use when the user asks about available channels or wants to know where to post.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "include_private": {
+          "type": "boolean",
+          "description": "Include private channels (default: true)"
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of channels to return (default 20, max 100)"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "slack_read_messages",
+    "description": "Read recent messages from a Slack channel. Use when the user asks what's been discussed in a channel, wants to catch up, or needs context from a specific channel.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "channel_id": {
+          "type": "string",
+          "description": "The Slack channel ID (e.g. C123ABC456). Use slack_list_channels first if you don't know the ID."
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of messages to return (default 15, max 50)"
+        }
+      },
+      "required": ["channel_id"]
+    }
+  },
+  {
+    "name": "slack_search",
+    "description": "Search messages across all Slack channels. Supports Slack search operators like from:user, in:channel, has:link, before:date, after:date. Use when the user asks to find a specific conversation, topic, or message.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query. Supports Slack operators: from:username, in:channel, has:link, before:2026-03-01, after:2026-01-01"
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of results to return (default 10, max 50)"
+        },
+        "sort": {
+          "type": "string",
+          "description": "Sort by: score (relevance, default) or timestamp"
+        }
+      },
+      "required": ["query"]
+    }
+  },
+  {
+    "name": "slack_send_message",
+    "description": "Send a message to a Slack channel. IMPORTANT: Always confirm with the user before sending. Show them the channel, message content, and ask for approval first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "channel_id": {
+          "type": "string",
+          "description": "The Slack channel ID to post to. Use slack_list_channels first if needed."
+        },
+        "text": {
+          "type": "string",
+          "description": "The message text to send. Supports Slack markdown formatting."
+        },
+        "thread_ts": {
+          "type": "string",
+          "description": "Optional: reply in a thread by providing the parent message timestamp"
+        }
+      },
+      "required": ["channel_id", "text"]
+    }
+  },
+  {
+    "name": "slack_send_dm",
+    "description": "Send a direct message to a Slack user. IMPORTANT: Always confirm with the user before sending. Show them the recipient, message content, and ask for approval first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "user_id": {
+          "type": "string",
+          "description": "The Slack user ID to DM. Use slack_list_users first if you don't know the ID."
+        },
+        "text": {
+          "type": "string",
+          "description": "The message text to send."
+        }
+      },
+      "required": ["user_id", "text"]
+    }
+  },
+  {
+    "name": "slack_list_users",
+    "description": "List users in the Slack workspace. Use when the user asks about team members, wants to find someone's Slack ID, or needs to look up who's in the workspace.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "max_results": {
+          "type": "integer",
+          "description": "Maximum number of users to return (default 20, max 100)"
+        }
+      },
+      "required": []
+    }
+  }
+]
